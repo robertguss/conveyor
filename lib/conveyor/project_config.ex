@@ -32,6 +32,7 @@ defmodule Conveyor.ProjectConfig do
     :source_path,
     :version,
     :project_key,
+    :run_spec_lock_behavior,
     :defaults,
     :toolchain_profiles,
     :policy_profiles,
@@ -54,7 +55,8 @@ defmodule Conveyor.ProjectConfig do
 
         findings =
           parse_findings ++
-            validation_findings ++ locked_run_spec_findings(config, Keyword.get(opts, :locked_run_spec))
+            validation_findings ++
+            locked_run_spec_findings(config, Keyword.get(opts, :locked_run_spec))
 
         event = to_log_event(config, findings, source_path)
 
@@ -96,6 +98,7 @@ defmodule Conveyor.ProjectConfig do
       status: if(error_findings?(findings), do: "error", else: "ok"),
       config_digest: config && config.digest,
       project_key: config && config.project_key,
+      run_spec_lock_behavior: config && config.run_spec_lock_behavior,
       resolved_profiles: resolved_profiles(config),
       commands: resolved_commands(config),
       artifact_projection: config && config.artifact_projection,
@@ -321,12 +324,19 @@ defmodule Conveyor.ProjectConfig do
     }
 
     {commands, command_findings} =
-      normalize_commands(raw_config, defaults, toolchain_profiles, policy_profiles, code_quality_profiles)
+      normalize_commands(
+        raw_config,
+        defaults,
+        toolchain_profiles,
+        policy_profiles,
+        code_quality_profiles
+      )
 
     config = %__MODULE__{
       source_path: source_path,
       version: Map.get(raw_config, "version"),
       project_key: Map.get(raw_config, "project_key"),
+      run_spec_lock_behavior: Map.get(raw_config, "run_spec_lock_behavior"),
       defaults: defaults,
       toolchain_profiles: toolchain_profiles,
       policy_profiles: policy_profiles,
@@ -340,6 +350,7 @@ defmodule Conveyor.ProjectConfig do
       []
       |> require_version(config.version)
       |> require_string(config.project_key, "project_key", "project_key is required")
+      |> require_run_spec_lock_behavior(config.run_spec_lock_behavior)
       |> require_default_profile(defaults, "toolchain_profile", toolchain_profiles)
       |> require_default_profile(defaults, "policy_profile", policy_profiles)
       |> require_default_profile(defaults, "code_quality_profile", code_quality_profiles)
@@ -354,7 +365,13 @@ defmodule Conveyor.ProjectConfig do
     {config, findings}
   end
 
-  defp normalize_commands(raw_config, defaults, toolchain_profiles, policy_profiles, code_quality_profiles) do
+  defp normalize_commands(
+         raw_config,
+         defaults,
+         toolchain_profiles,
+         policy_profiles,
+         code_quality_profiles
+       ) do
     raw_commands = get_path(raw_config, ["commands"]) || %{}
 
     base_findings =
@@ -377,7 +394,12 @@ defmodule Conveyor.ProjectConfig do
       @required_commands
       |> Enum.reject(&Map.has_key?(raw_commands, &1))
       |> Enum.map(fn id ->
-        finding("missing_required_command", "error", "missing required command #{id}", "commands.#{id}")
+        finding(
+          "missing_required_command",
+          "error",
+          "missing required command #{id}",
+          "commands.#{id}"
+        )
       end)
 
     {commands, spec_findings} =
@@ -414,7 +436,14 @@ defmodule Conveyor.ProjectConfig do
     {commands, base_findings ++ missing_findings ++ spec_findings ++ consumer_findings}
   end
 
-  defp normalize_command(id, spec, defaults, toolchain_profiles, policy_profiles, code_quality_profiles)
+  defp normalize_command(
+         id,
+         spec,
+         defaults,
+         toolchain_profiles,
+         policy_profiles,
+         code_quality_profiles
+       )
        when is_map(spec) do
     command =
       %{
@@ -429,7 +458,8 @@ defmodule Conveyor.ProjectConfig do
         "network" => Map.get(spec, "network", "disabled"),
         "toolchain_profile" => Map.get(spec, "toolchain_profile", defaults["toolchain_profile"]),
         "policy_profile" => Map.get(spec, "policy_profile", defaults["policy_profile"]),
-        "code_quality_profile" => Map.get(spec, "code_quality_profile", defaults["code_quality_profile"]),
+        "code_quality_profile" =>
+          Map.get(spec, "code_quality_profile", defaults["code_quality_profile"]),
         "artifact_path" => Map.get(spec, "artifact_path"),
         "consumers" => Map.get(spec, "consumers", [])
       }
@@ -445,7 +475,14 @@ defmodule Conveyor.ProjectConfig do
     {id, command, findings}
   end
 
-  defp normalize_command(id, _spec, _defaults, _toolchain_profiles, _policy_profiles, _code_quality_profiles) do
+  defp normalize_command(
+         id,
+         _spec,
+         _defaults,
+         _toolchain_profiles,
+         _policy_profiles,
+         _code_quality_profiles
+       ) do
     command = %{"id" => id, "consumers" => []}
 
     finding =
@@ -469,7 +506,12 @@ defmodule Conveyor.ProjectConfig do
           require_positive_integer(findings, Map.get(command, field), "commands.#{id}.#{field}")
 
         true ->
-          require_string(findings, Map.get(command, field), "commands.#{id}.#{field}", "#{field} is required")
+          require_string(
+            findings,
+            Map.get(command, field),
+            "commands.#{id}.#{field}",
+            "#{field} is required"
+          )
       end
     end)
   end
@@ -491,7 +533,11 @@ defmodule Conveyor.ProjectConfig do
 
   defp require_version(findings, other) do
     [
-      finding("unsupported_config_version", "error", "config version must be integer 1", "version",
+      finding(
+        "unsupported_config_version",
+        "error",
+        "config version must be integer 1",
+        "version",
         nil,
         %{actual: other}
       )
@@ -530,6 +576,22 @@ defmodule Conveyor.ProjectConfig do
     end
   end
 
+  defp require_run_spec_lock_behavior(findings, "reject_overrides"), do: findings
+
+  defp require_run_spec_lock_behavior(findings, value) do
+    [
+      finding(
+        "unsupported_run_spec_lock_behavior",
+        "error",
+        "run_spec_lock_behavior must be reject_overrides",
+        "run_spec_lock_behavior",
+        nil,
+        %{actual: value}
+      )
+      | findings
+    ]
+  end
+
   defp require_profile_ref(findings, command_id, command, field, profiles) do
     value = Map.get(command, field)
 
@@ -560,7 +622,10 @@ defmodule Conveyor.ProjectConfig do
     if is_list(value) and Enum.all?(value, &(is_binary(&1) and &1 != "")) do
       findings
     else
-      [finding("invalid_string_list", "error", "#{path} must be a list of strings", path) | findings]
+      [
+        finding("invalid_string_list", "error", "#{path} must be a list of strings", path)
+        | findings
+      ]
     end
   end
 
@@ -568,7 +633,10 @@ defmodule Conveyor.ProjectConfig do
     if is_integer(value) and value > 0 do
       findings
     else
-      [finding("invalid_positive_integer", "error", "#{path} must be a positive integer", path) | findings]
+      [
+        finding("invalid_positive_integer", "error", "#{path} must be a positive integer", path)
+        | findings
+      ]
     end
   end
 
@@ -585,7 +653,8 @@ defmodule Conveyor.ProjectConfig do
   defp locked_run_spec_findings(config, locked_run_spec) when is_map(locked_run_spec) do
     started? =
       truthy?(Map.get(locked_run_spec, "locked")) or truthy?(Map.get(locked_run_spec, :locked)) or
-        present?(Map.get(locked_run_spec, "started_at")) or present?(Map.get(locked_run_spec, :started_at))
+        present?(Map.get(locked_run_spec, "started_at")) or
+        present?(Map.get(locked_run_spec, :started_at))
 
     expected_digest =
       Map.get(locked_run_spec, "project_config_digest") ||
@@ -665,6 +734,7 @@ defmodule Conveyor.ProjectConfig do
       %{
         version: config.version,
         project_key: config.project_key,
+        run_spec_lock_behavior: config.run_spec_lock_behavior,
         defaults: config.defaults,
         toolchain_profiles: config.toolchain_profiles,
         policy_profiles: config.policy_profiles,
