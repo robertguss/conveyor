@@ -27,7 +27,12 @@ defmodule Conveyor.PlanImport do
 
       {:error, reason} ->
         report(nil, path, "missing_file", [], [
-          finding("source_read_failed", "error", "$", "could not read plan source: #{inspect(reason)}")
+          finding(
+            "source_read_failed",
+            "error",
+            "$",
+            "could not read plan source: #{inspect(reason)}"
+          )
         ])
     end
   end
@@ -70,7 +75,8 @@ defmodule Conveyor.PlanImport do
     |> persist_report!()
   end
 
-  def contract_sha256(contract) when is_map(contract), do: PayloadHelpers.canonical_sha256(contract)
+  def contract_sha256(contract) when is_map(contract),
+    do: PayloadHelpers.canonical_sha256(contract)
 
   defp persist_report!(%{handoff_ready: true, normalized_contract: contract} = report) do
     payload =
@@ -152,14 +158,21 @@ defmodule Conveyor.PlanImport do
         {:ok, contract, source_ref}
 
       {:ok, _other} ->
-        {:error, source_ref.source_kind, [
-          finding("invalid_source_payload", "error", "$", "plan source must decode to an object")
-        ]}
+        {:error, source_ref.source_kind,
+         [
+           finding("invalid_source_payload", "error", "$", "plan source must decode to an object")
+         ]}
 
       {:error, error} ->
-        {:error, source_ref.source_kind, [
-          finding("malformed_source", "error", "$", "could not parse JSON plan: #{Exception.message(error)}")
-        ]}
+        {:error, source_ref.source_kind,
+         [
+           finding(
+             "malformed_source",
+             "error",
+             "$",
+             "could not parse JSON plan: #{Exception.message(error)}"
+           )
+         ]}
     end
   end
 
@@ -169,14 +182,21 @@ defmodule Conveyor.PlanImport do
         {:ok, contract, source_ref}
 
       {:ok, _other} ->
-        {:error, source_ref.source_kind, [
-          finding("invalid_source_payload", "error", "$", "plan source must decode to an object")
-        ]}
+        {:error, source_ref.source_kind,
+         [
+           finding("invalid_source_payload", "error", "$", "plan source must decode to an object")
+         ]}
 
       {:error, error} ->
-        {:error, source_ref.source_kind, [
-          finding("malformed_source", "error", "$", "could not parse YAML plan: #{Exception.message(error)}")
-        ]}
+        {:error, source_ref.source_kind,
+         [
+           finding(
+             "malformed_source",
+             "error",
+             "$",
+             "could not parse YAML plan: #{Exception.message(error)}"
+           )
+         ]}
     end
   end
 
@@ -188,11 +208,25 @@ defmodule Conveyor.PlanImport do
             validate_value(schema, contract, "$")
 
           {:error, error} ->
-            [finding("schema_load_failed", "error", "$", "invalid plan schema JSON: #{Exception.message(error)}")]
+            [
+              finding(
+                "schema_load_failed",
+                "error",
+                "$",
+                "invalid plan schema JSON: #{Exception.message(error)}"
+              )
+            ]
         end
 
       {:error, reason} ->
-        [finding("schema_load_failed", "error", "$", "could not read plan schema: #{inspect(reason)}")]
+        [
+          finding(
+            "schema_load_failed",
+            "error",
+            "$",
+            "could not read plan schema: #{inspect(reason)}"
+          )
+        ]
     end
   end
 
@@ -208,7 +242,12 @@ defmodule Conveyor.PlanImport do
       findings
     else
       [
-        finding("invalid_const", "error", path, "expected #{inspect(expected)}, got #{inspect(value)}")
+        finding(
+          "invalid_const",
+          "error",
+          path,
+          "expected #{inspect(expected)}, got #{inspect(value)}"
+        )
         | findings
       ]
     end
@@ -221,7 +260,12 @@ defmodule Conveyor.PlanImport do
       findings
     else
       [
-        finding("invalid_enum", "error", path, "expected one of #{inspect(allowed)}, got #{inspect(value)}")
+        finding(
+          "invalid_enum",
+          "error",
+          path,
+          "expected one of #{inspect(allowed)}, got #{inspect(value)}"
+        )
         | findings
       ]
     end
@@ -229,11 +273,13 @@ defmodule Conveyor.PlanImport do
 
   defp add_enum_findings(findings, _schema, _value, _path), do: findings
 
-  defp add_type_findings(findings, %{"type" => "object"} = schema, value, path) when is_map(value) do
+  defp add_type_findings(findings, %{"type" => "object"} = schema, value, path)
+       when is_map(value) do
     findings ++ validate_object(schema, value, path)
   end
 
-  defp add_type_findings(findings, %{"type" => "array"} = schema, value, path) when is_list(value) do
+  defp add_type_findings(findings, %{"type" => "array"} = schema, value, path)
+       when is_list(value) do
     findings ++ validate_array(schema, value, path)
   end
 
@@ -264,7 +310,12 @@ defmodule Conveyor.PlanImport do
       required
       |> Enum.reject(&Map.has_key?(value, &1))
       |> Enum.map(fn key ->
-        finding("missing_required_field", "error", "#{path}.#{key}", "required field #{key} is missing")
+        finding(
+          "missing_required_field",
+          "error",
+          "#{path}.#{key}",
+          "required field #{key} is missing"
+        )
       end)
 
     extra_findings =
@@ -319,7 +370,14 @@ defmodule Conveyor.PlanImport do
     case Map.get(schema, "minLength") do
       count when is_integer(count) ->
         if String.length(value) < count do
-          [finding("min_length_violation", "error", path, "expected at least #{count} character(s)")]
+          [
+            finding(
+              "min_length_violation",
+              "error",
+              path,
+              "expected at least #{count} character(s)"
+            )
+          ]
         else
           []
         end
@@ -343,7 +401,8 @@ defmodule Conveyor.PlanImport do
       contract_schema_version: contract && contract["schema_version"],
       contract_sha256: contract_sha256,
       normalized_contract: contract,
-      normalized_contract_summary: contract && normalized_contract_summary(contract, contract_sha256),
+      normalized_contract_summary:
+        contract && normalized_contract_summary(contract, contract_sha256),
       source_refs: source_refs,
       findings: findings
     }

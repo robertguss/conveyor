@@ -14,6 +14,7 @@ assumed datastore.
 - Oban facade: `Conveyor.Oban`
 - Project config loader: `Conveyor.ProjectConfig`
 - Project config evidence task: `mix conveyor.config_probe`
+- Runtime prerequisite doctor: `mix conveyor.doctor`
 - Boot/version evidence task: `mix conveyor.version_probe`
 
 ## Local Checks
@@ -32,6 +33,7 @@ Manual equivalent:
 
 ```bash
 mix deps.get
+mix conveyor.doctor --output tmp/conveyor_doctor.json --transcript tmp/conveyor_doctor.log
 mix ecto.create
 mix ecto.migrate
 mix conveyor.config_probe --config .conveyor/config.toml --output tmp/conveyor_config_probe.json

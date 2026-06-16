@@ -31,6 +31,7 @@ export CONVEYOR_SESSION_SIGNING_SALT=<session-signing-salt>
 export PHX_SECRET_KEY_BASE=<dev-or-test-secret-key-base>
 export PHX_LIVE_VIEW_SIGNING_SALT=<live-view-signing-salt>
 mix deps.get
+mix conveyor.doctor --output tmp/conveyor_doctor.json --transcript tmp/conveyor_doctor.log
 mix ecto.create
 mix ecto.migrate
 mix conveyor.config_probe --config .conveyor/config.toml --output tmp/conveyor_config_probe.json
@@ -50,6 +51,12 @@ It writes `tmp/ci/control-plane/summary.json`,
 `conveyor.config_probe` and `conveyor.version_probe` JSON/log artifacts. Credo
 and Dialyzer stations are recorded as skipped unless their Mix tasks are
 configured.
+
+`mix conveyor.doctor` checks local runtime prerequisites without starting the
+Phoenix application. Blocking failures use stable categories, NextAction
+guidance, and exit code `4`; optional provider and CodeScent adapters warn
+unless configured as gate-blocking. The report records runtime versions and
+writes `conveyor.doctor.report@1` JSON plus a transcript.
 
 `mix conveyor.config_probe` loads `.conveyor/config.toml`, normalizes command
 specs for PlanAudit, AGENTS.md generation, policy checks, and verification,
