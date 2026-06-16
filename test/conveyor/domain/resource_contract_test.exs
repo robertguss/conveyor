@@ -543,6 +543,131 @@ defmodule Conveyor.Domain.ResourceContractTest do
     assert Enum.any?(gate_results, &(&1.payload["gate_result_id"] == "exec-gate-result-001"))
   end
 
+  test "station idempotency resumes completed runs and reconciles unknown effects" do
+    station_attrs = %{
+      station_run_id: "idem-station-run-001",
+      run_attempt_id: "idem-run-attempt-001",
+      station_key: "evidence",
+      station_spec_sha256: "sha256:station-spec-v1",
+      attempt_number: 1,
+      input_sha256: "sha256:station-input-v1",
+      output_sha256: "sha256:station-output-v1",
+      station_status: "completed"
+    }
+
+    completed_station = Conveyor.Domain.StationRun.build!(station_attrs)
+
+    declared_effect =
+      Conveyor.Domain.StationEffect.build!(%{
+        effect_id: "idem-effect-001",
+        run_attempt_id: completed_station["run_attempt_id"],
+        station_run_id: completed_station["station_run_id"],
+        effect_type: "artifact_write",
+        external_ref: "artifact://idem/evidence.json",
+        output_sha256: completed_station["output_sha256"],
+        declared_at: ~U[2026-06-16 21:20:00Z]
+      })
+
+    assert declared_effect["effect_status"] == "declared"
+    assert declared_effect["idempotency_key"] =~ ~r/^sha256:[a-f0-9]{64}$/
+
+    assert {:ok, _effect_record} =
+             Ash.create(
+               Conveyor.Domain.StationEffect,
+               Conveyor.Domain.StationEffect.create_attrs!(declared_effect),
+               action: :create
+             )
+
+    assert {:ok, _station_record} =
+             Ash.create(
+               Conveyor.Domain.StationRun,
+               Conveyor.Domain.StationRun.create_attrs!(completed_station),
+               action: :create
+             )
+
+    duplicate_station =
+      Conveyor.Domain.StationRun.build!(%{
+        station_attrs
+        | station_run_id: "idem-station-run-duplicate"
+      })
+
+    assert duplicate_station["idempotency_key"] == completed_station["idempotency_key"]
+
+    assert {:error, duplicate_error} =
+             Ash.create(
+               Conveyor.Domain.StationRun,
+               Conveyor.Domain.StationRun.create_attrs!(duplicate_station),
+               action: :create
+             )
+
+    assert Exception.message(duplicate_error) =~ "station_runs_idempotency_key_unique"
+
+    assert %{
+             schema_version: "conveyor.station_run_retry_decision@1",
+             category: "station_retry_decision",
+             action: "resume_completed_station",
+             reason: "station_already_completed",
+             retry_safe: true,
+             duplicate_artifacts: false,
+             existing_idempotency_key: idempotency_key,
+             requested_idempotency_key: requested_idempotency_key
+           } = Conveyor.Domain.StationRun.retry_decision(completed_station, station_attrs)
+
+    assert requested_idempotency_key == idempotency_key
+
+    changed_input_attrs = %{
+      station_attrs
+      | station_run_id: "idem-station-run-002",
+        station_spec_sha256: "sha256:station-spec-v2",
+        attempt_number: 2,
+        input_sha256: "sha256:station-input-v2"
+    }
+
+    assert %{
+             action: "create_new_station_attempt",
+             reason: "station_inputs_changed",
+             retry_safe: false
+           } = Conveyor.Domain.StationRun.retry_decision(completed_station, changed_input_attrs)
+
+    unknown_effect =
+      Conveyor.Domain.StationEffect.build!(%{
+        effect_id: "idem-effect-unknown",
+        run_attempt_id: completed_station["run_attempt_id"],
+        station_run_id: completed_station["station_run_id"],
+        effect_type: "external_process",
+        external_ref: "process://unknown",
+        declared_at: ~U[2026-06-16 21:21:00Z],
+        effect_status: "unknown"
+      })
+
+    assert %{
+             action: "reconcile_unknown_effects_before_retry",
+             reason: "unknown_effects_present",
+             retry_safe: false,
+             unknown_effect_ids: ["idem-effect-unknown"]
+           } =
+             Conveyor.Domain.StationRun.retry_decision(completed_station, station_attrs, [
+               unknown_effect
+             ])
+
+    assert %{
+             schema_version: "conveyor.station_run_idempotency_summary@1",
+             category: "station_idempotency",
+             station_run_id: "idem-station-run-001",
+             idempotency_key: ^idempotency_key,
+             output_sha256: "sha256:station-output-v1",
+             unknown_effect_ids: ["idem-effect-unknown"],
+             effect_states: effect_states
+           } =
+             Conveyor.Domain.StationRun.idempotency_summary(completed_station, [
+               declared_effect,
+               unknown_effect
+             ])
+
+    assert Enum.any?(effect_states, &(&1.effect_id == "idem-effect-001"))
+    assert Enum.any?(effect_states, &(&1.effect_status == "unknown"))
+  end
+
   defp resources, do: Conveyor.Domain.Resources.resource_modules()
   defp tables, do: Conveyor.Domain.Resources.table_names()
   defp append_only_resources, do: Conveyor.Domain.Resources.append_only_resources()

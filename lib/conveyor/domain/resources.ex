@@ -944,20 +944,29 @@ defmodule Conveyor.Domain.StationRun do
   use Conveyor.Domain.ActiveResource, table: "station_runs"
 
   @schema_version "conveyor.station_run@1"
+  @retry_decision_schema_version "conveyor.station_run_retry_decision@1"
+  @idempotency_summary_schema_version "conveyor.station_run_idempotency_summary@1"
 
   def build!(attrs) when is_map(attrs) do
-    Conveyor.Domain.ExecutionPayload.build!(
-      @schema_version,
-      attrs,
-      [
-        :station_run_id,
-        :run_attempt_id,
-        :station_key,
-        :station_spec_sha256,
-        :attempt_number
-      ],
-      %{station_status: "planned"},
-      [:input_sha256, :output_sha256, :idempotency_key, :metadata]
+    payload =
+      Conveyor.Domain.ExecutionPayload.build!(
+        @schema_version,
+        attrs,
+        [
+          :station_run_id,
+          :run_attempt_id,
+          :station_key,
+          :station_spec_sha256,
+          :attempt_number
+        ],
+        %{station_status: "planned"},
+        [:input_sha256, :output_sha256, :metadata]
+      )
+
+    Map.put(
+      payload,
+      "idempotency_key",
+      Conveyor.Domain.PayloadHelpers.get(attrs, :idempotency_key) || idempotency_key(payload)
     )
   end
 
@@ -966,6 +975,116 @@ defmodule Conveyor.Domain.StationRun do
     |> build!()
     |> Conveyor.Domain.ExecutionPayload.create_attrs!(:station_run_id, :station_key)
   end
+
+  def idempotency_key(attrs) when is_map(attrs) do
+    Conveyor.Domain.PayloadHelpers.canonical_sha256(%{
+      "kind" => "station_run_idempotency",
+      "run_attempt_id" => Conveyor.Domain.PayloadHelpers.fetch_required!(attrs, :run_attempt_id),
+      "station_key" => Conveyor.Domain.PayloadHelpers.fetch_required!(attrs, :station_key),
+      "station_spec_sha256" =>
+        Conveyor.Domain.PayloadHelpers.fetch_required!(attrs, :station_spec_sha256),
+      "attempt_number" => Conveyor.Domain.PayloadHelpers.fetch_required!(attrs, :attempt_number)
+    })
+  end
+
+  def retry_decision(existing_run, requested_run, effects \\ [])
+      when is_map(existing_run) and is_map(requested_run) do
+    existing = payload(existing_run)
+    requested = build!(requested_run)
+    unknown_effects = Conveyor.Domain.StationEffect.unknown_effects(effects)
+
+    cond do
+      unknown_effects != [] ->
+        decision(
+          existing,
+          requested,
+          "reconcile_unknown_effects_before_retry",
+          "unknown_effects_present",
+          false,
+          unknown_effects
+        )
+
+      inputs_changed?(existing, requested) ->
+        decision(
+          existing,
+          requested,
+          "create_new_station_attempt",
+          "station_inputs_changed",
+          false
+        )
+
+      existing["station_status"] == "completed" ->
+        decision(
+          existing,
+          requested,
+          "resume_completed_station",
+          "station_already_completed",
+          true
+        )
+
+      existing["idempotency_key"] == requested["idempotency_key"] ->
+        decision(existing, requested, "retry_station_run", "same_idempotency_key", true)
+
+      true ->
+        decision(
+          existing,
+          requested,
+          "create_new_station_attempt",
+          "idempotency_key_changed",
+          false
+        )
+    end
+  end
+
+  def idempotency_summary(station_run, effects) when is_map(station_run) and is_list(effects) do
+    run = payload(station_run)
+    effect_payloads = Enum.map(effects, &Conveyor.Domain.StationEffect.payload/1)
+
+    %{
+      schema_version: @idempotency_summary_schema_version,
+      category: "station_idempotency",
+      station_run_id: run["station_run_id"],
+      idempotency_key: run["idempotency_key"],
+      output_sha256: run["output_sha256"],
+      effect_states:
+        Enum.map(effect_payloads, fn effect ->
+          %{
+            effect_id: effect["effect_id"],
+            idempotency_key: effect["idempotency_key"],
+            effect_status: effect["effect_status"],
+            output_sha256: effect["output_sha256"]
+          }
+        end),
+      unknown_effect_ids:
+        effect_payloads
+        |> Conveyor.Domain.StationEffect.unknown_effects()
+        |> Enum.map(& &1["effect_id"])
+    }
+  end
+
+  defp inputs_changed?(existing, requested) do
+    existing["input_sha256"] != requested["input_sha256"] ||
+      existing["station_spec_sha256"] != requested["station_spec_sha256"]
+  end
+
+  defp decision(existing, requested, action, reason, retry_safe, unknown_effects \\ []) do
+    %{
+      schema_version: @retry_decision_schema_version,
+      category: "station_retry_decision",
+      action: action,
+      reason: reason,
+      retry_safe: retry_safe,
+      duplicate_artifacts: false,
+      existing_station_run_id: existing["station_run_id"],
+      requested_station_run_id: requested["station_run_id"],
+      existing_idempotency_key: existing["idempotency_key"],
+      requested_idempotency_key: requested["idempotency_key"],
+      unknown_effect_ids: Enum.map(unknown_effects, & &1["effect_id"])
+    }
+  end
+
+  defp payload(%{payload: payload}) when is_map(payload), do: payload
+  defp payload(payload) when is_map(payload), do: payload
 end
 
 defmodule Conveyor.Domain.Evidence do
@@ -1387,6 +1506,50 @@ end
 
 defmodule Conveyor.Domain.StationEffect do
   use Conveyor.Domain.ActiveResource, table: "station_effects"
+
+  @schema_version "conveyor.station_effect@1"
+
+  def build!(attrs) when is_map(attrs) do
+    payload =
+      Conveyor.Domain.ExecutionPayload.build!(
+        @schema_version,
+        attrs,
+        [:effect_id, :run_attempt_id, :station_run_id, :effect_type, :declared_at],
+        %{effect_status: "declared"},
+        [:external_ref, :output_sha256, :metadata]
+      )
+
+    Map.put(
+      payload,
+      "idempotency_key",
+      Conveyor.Domain.PayloadHelpers.get(attrs, :idempotency_key) || idempotency_key(payload)
+    )
+  end
+
+  def create_attrs!(attrs) when is_map(attrs) do
+    attrs
+    |> build!()
+    |> Conveyor.Domain.ExecutionPayload.create_attrs!(:effect_id, :effect_type)
+  end
+
+  def idempotency_key(attrs) when is_map(attrs) do
+    Conveyor.Domain.PayloadHelpers.canonical_sha256(%{
+      "kind" => "station_effect_idempotency",
+      "station_run_id" => Conveyor.Domain.PayloadHelpers.fetch_required!(attrs, :station_run_id),
+      "effect_type" => Conveyor.Domain.PayloadHelpers.fetch_required!(attrs, :effect_type),
+      "external_ref" => Conveyor.Domain.PayloadHelpers.get(attrs, :external_ref, ""),
+      "output_sha256" => Conveyor.Domain.PayloadHelpers.get(attrs, :output_sha256, "")
+    })
+  end
+
+  def unknown_effects(effects) when is_list(effects) do
+    effects
+    |> Enum.map(&payload/1)
+    |> Enum.filter(&(&1["effect_status"] in ["unknown", "unreconciled"]))
+  end
+
+  def payload(%{payload: payload}) when is_map(payload), do: payload
+  def payload(payload) when is_map(payload), do: payload
 end
 
 defmodule Conveyor.Domain.CredentialLease do
