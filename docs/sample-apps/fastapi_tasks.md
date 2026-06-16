@@ -30,7 +30,7 @@ It emits a timestamped local evidence directory containing `pytest-junit.xml`,
 ## RunSpec Input
 
 The machine-readable RunSpec input lives at
-`sample_apps/fastapi_tasks/run_specs/baseline.run_spec.json`. The baseline
-commit field is filled after the first commit that contains the sample app, so
-future Conveyor runs can refer to a stable base.
+`sample_apps/fastapi_tasks/run_specs/baseline.run_spec.json`.
 
+Baseline commit:
+`16482bf29cc866c81c8619e65c417eafc684adc8`

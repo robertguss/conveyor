@@ -4,8 +4,8 @@
     "name": "fastapi_tasks_sample",
     "kind": "sterile_sample",
     "path": "sample_apps/fastapi_tasks",
-    "baseline_commit": null,
-    "baseline_commit_status": "pending_first_sample_commit"
+    "baseline_commit": "16482bf29cc866c81c8619e65c417eafc684adc8",
+    "baseline_commit_status": "recorded"
   },
   "runtime": {
     "language": "python",
@@ -24,4 +24,3 @@
     "raw_log": "artifacts/<run_id>/pytest.log"
   }
 }
-
