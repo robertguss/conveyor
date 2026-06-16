@@ -9,15 +9,16 @@ defmodule Conveyor.Domain.ActiveResource do
 
   defmacro __using__(opts) do
     table = Keyword.fetch!(opts, :table)
+    update_accept = Keyword.get(opts, :update_accept, [:name, :status, :payload])
 
-    quote bind_quoted: [table: table] do
+    quote do
       use Ash.Resource,
         otp_app: :conveyor,
         domain: Conveyor.Domain,
         data_layer: AshPostgres.DataLayer
 
       postgres do
-        table(table)
+        table(unquote(table))
         repo(Conveyor.Repo)
       end
 
@@ -31,7 +32,7 @@ defmodule Conveyor.Domain.ActiveResource do
 
         update :update do
           primary?(true)
-          accept([:name, :status, :payload])
+          accept(unquote(update_accept))
         end
       end
 
@@ -86,6 +87,7 @@ defmodule Conveyor.Domain.Resources do
 
   @schema_version "conveyor.domain_resource_contract@1"
   @immutable_fields [:id, :external_id, :inserted_at]
+  @append_only_resources [Conveyor.Domain.LedgerEvent]
   @resource_specs [
     {Conveyor.Domain.Project, :projects},
     {Conveyor.Domain.ToolchainProfile, :toolchain_profiles},
@@ -139,6 +141,7 @@ defmodule Conveyor.Domain.Resources do
   def resource_modules, do: Enum.map(@resource_specs, &elem(&1, 0))
   def table_names, do: Enum.map(@resource_specs, &elem(&1, 1))
   def immutable_fields, do: @immutable_fields
+  def append_only_resources, do: @append_only_resources
 
   def migration_log do
     %{
@@ -259,7 +262,196 @@ defmodule Conveyor.Domain.RunPrompt do
 end
 
 defmodule Conveyor.Domain.RunSpec do
-  use Conveyor.Domain.ActiveResource, table: "run_specs"
+  use Conveyor.Domain.ActiveResource, table: "run_specs", update_accept: [:name, :status]
+
+  @schema_version "run_spec@1"
+  @station_plan_version "station_plan@1"
+  @digest_keys [
+    "project",
+    "base_commit",
+    "slice",
+    "autonomy_level",
+    "plan",
+    "decision",
+    "agent_brief",
+    "contract_lock",
+    "agents",
+    "policy",
+    "diff_policy",
+    "test_pack",
+    "verification",
+    "prompt",
+    "agent_profile",
+    "toolchain",
+    "sandbox",
+    "budget",
+    "code_quality",
+    "canary",
+    "schema",
+    "station_plan"
+  ]
+
+  def schema_version, do: @schema_version
+  def station_plan_version, do: @station_plan_version
+  def digest_keys, do: @digest_keys
+
+  def build!(attrs) when is_map(attrs) do
+    contract_digests =
+      attrs
+      |> fetch_required!(:contract_digests)
+      |> normalize_digest_set!()
+
+    unsigned = %{
+      "schema_version" => @schema_version,
+      "run_id" => fetch_required!(attrs, :run_id),
+      "project_id" => fetch_required!(attrs, :project_id),
+      "base_commit" => fetch_required!(attrs, :base_commit),
+      "slice_id" => fetch_required!(attrs, :slice_id),
+      "autonomy_level" => fetch_required!(attrs, :autonomy_level),
+      "contract_digests" => contract_digests,
+      "stations" => normalize_stations!(fetch_required!(attrs, :stations))
+    }
+
+    run_spec_sha256 = sha256(unsigned)
+
+    unsigned
+    |> Map.put("run_spec_sha256", run_spec_sha256)
+    |> Map.update!("stations", fn stations ->
+      Enum.map(stations, &bind_station_io(&1, run_spec_sha256))
+    end)
+  end
+
+  def create_attrs!(attrs) when is_map(attrs) do
+    run_spec = build!(attrs)
+
+    %{
+      external_id: run_spec["run_spec_sha256"],
+      name: run_spec["run_id"],
+      status: "active",
+      payload: run_spec
+    }
+  end
+
+  def digest_summary(run_spec) when is_map(run_spec) do
+    contract_digests = Map.fetch!(run_spec, "contract_digests")
+
+    %{
+      schema_version: "conveyor.run_spec_digest_summary@1",
+      category: "run_spec_digest_set",
+      run_id: run_spec["run_id"],
+      run_spec_sha256: run_spec["run_spec_sha256"],
+      digest_count: map_size(contract_digests),
+      digest_keys: Map.keys(contract_digests),
+      station_keys: Enum.map(run_spec["stations"], & &1["station_key"])
+    }
+  end
+
+  def diff_finding(old_run_spec, new_run_spec)
+      when is_map(old_run_spec) and is_map(new_run_spec) do
+    changed_keys =
+      @digest_keys
+      |> Enum.filter(fn key ->
+        get_in(old_run_spec, ["contract_digests", key]) !=
+          get_in(new_run_spec, ["contract_digests", key])
+      end)
+
+    %{
+      schema_version: "conveyor.run_spec_diff@1",
+      category: "run_spec_contract_change",
+      finding_code: "contract_change_requires_new_run_spec_and_run_attempt",
+      action: "create_new_run_spec_and_run_attempt",
+      old_run_spec_sha256: old_run_spec["run_spec_sha256"],
+      new_run_spec_sha256: new_run_spec["run_spec_sha256"],
+      changed_digest_keys: changed_keys
+    }
+  end
+
+  def equivalent?(left_run_spec, right_run_spec)
+      when is_map(left_run_spec) and is_map(right_run_spec) do
+    left_run_spec["run_spec_sha256"] == right_run_spec["run_spec_sha256"]
+  end
+
+  defp normalize_digest_set!(digest_set) when is_map(digest_set) do
+    normalized =
+      digest_set
+      |> Enum.map(fn {key, value} -> {to_string(key), value} end)
+      |> Map.new()
+
+    missing = @digest_keys -- Map.keys(normalized)
+
+    if missing == [] do
+      Map.take(normalized, @digest_keys)
+    else
+      raise ArgumentError, "missing RunSpec digest keys: #{Enum.join(missing, ", ")}"
+    end
+  end
+
+  defp normalize_digest_set!(_digest_set) do
+    raise ArgumentError, "RunSpec contract_digests must be a map"
+  end
+
+  defp normalize_stations!(stations) when is_list(stations) and stations != [] do
+    Enum.map(stations, fn station ->
+      %{
+        "schema_version" => @station_plan_version,
+        "station_key" => fetch_required!(station, :station_key),
+        "intent" => fetch_required!(station, :intent),
+        "inputs" =>
+          normalize_map!(Map.get(station, :inputs) || Map.get(station, "inputs") || %{}),
+        "outputs" =>
+          normalize_map!(Map.get(station, :outputs) || Map.get(station, "outputs") || %{})
+      }
+    end)
+  end
+
+  defp normalize_stations!(_stations) do
+    raise ArgumentError, "RunSpec stations must be a non-empty list"
+  end
+
+  defp bind_station_io(station, run_spec_sha256) do
+    station
+    |> Map.update!("inputs", &Map.put(&1, "run_spec_sha256", run_spec_sha256))
+    |> Map.update!("outputs", &Map.put(&1, "run_spec_sha256", run_spec_sha256))
+  end
+
+  defp normalize_map!(map) when is_map(map) do
+    Map.new(map, fn {key, value} -> {to_string(key), value} end)
+  end
+
+  defp normalize_map!(_map) do
+    raise ArgumentError, "RunSpec station inputs and outputs must be maps"
+  end
+
+  defp fetch_required!(map, key) do
+    Map.get(map, key) || Map.get(map, to_string(key)) ||
+      raise ArgumentError, "missing required RunSpec field: #{key}"
+  end
+
+  defp sha256(payload) do
+    digest =
+      :crypto.hash(:sha256, canonical_json(payload))
+      |> Base.encode16(case: :lower)
+
+    "sha256:#{digest}"
+  end
+
+  defp canonical_json(map) when is_map(map) do
+    map
+    |> Enum.map(fn {key, value} -> {to_string(key), value} end)
+    |> Enum.sort_by(&elem(&1, 0))
+    |> Enum.map_join(",", fn {key, value} ->
+      Jason.encode!(key) <> ":" <> canonical_json(value)
+    end)
+    |> then(&"{#{&1}}")
+  end
+
+  defp canonical_json(list) when is_list(list) do
+    list
+    |> Enum.map_join(",", &canonical_json/1)
+    |> then(&"[#{&1}]")
+  end
+
+  defp canonical_json(value), do: Jason.encode!(value)
 end
 
 defmodule Conveyor.Domain.WorkspaceMaterialization do
@@ -323,7 +515,135 @@ defmodule Conveyor.Domain.GateHealth do
 end
 
 defmodule Conveyor.Domain.LedgerEvent do
-  use Conveyor.Domain.ActiveResource, table: "ledger_events"
+  @moduledoc """
+  Append-only audit event for the R0 Conveyor timeline.
+
+  Ash/Postgres resources remain state truth. Ledger events are immutable
+  evidence for human-readable replay, idempotency, and downstream outbox
+  observers.
+  """
+
+  use Ash.Resource,
+    otp_app: :conveyor,
+    domain: Conveyor.Domain,
+    data_layer: AshPostgres.DataLayer
+
+  postgres do
+    table("ledger_events")
+    repo(Conveyor.Repo)
+  end
+
+  actions do
+    defaults([:read])
+
+    create :create do
+      primary?(true)
+
+      accept([
+        :external_id,
+        :name,
+        :status,
+        :payload,
+        :idempotency_key,
+        :trace_id,
+        :span_id,
+        :stream_id,
+        :event_type,
+        :occurred_at,
+        :summary,
+        :metadata
+      ])
+    end
+  end
+
+  attributes do
+    uuid_primary_key(:id)
+
+    attribute :external_id, :string do
+      allow_nil?(false)
+      public?(true)
+      constraints(min_length: 1)
+    end
+
+    attribute :name, :string do
+      allow_nil?(false)
+      public?(true)
+      constraints(min_length: 1)
+    end
+
+    attribute :status, :string do
+      allow_nil?(false)
+      public?(true)
+      default("active")
+      constraints(match: ~r/^(active|paused|archived)$/)
+    end
+
+    attribute :payload, :map do
+      allow_nil?(false)
+      public?(true)
+      default(%{})
+    end
+
+    attribute :idempotency_key, :string do
+      allow_nil?(false)
+      public?(true)
+      constraints(min_length: 1)
+    end
+
+    attribute :trace_id, :string do
+      allow_nil?(false)
+      public?(true)
+      constraints(min_length: 1)
+    end
+
+    attribute :span_id, :string do
+      allow_nil?(false)
+      public?(true)
+      constraints(min_length: 1)
+    end
+
+    attribute :stream_id, :string do
+      allow_nil?(false)
+      public?(true)
+      constraints(min_length: 1)
+    end
+
+    attribute :event_type, :string do
+      allow_nil?(false)
+      public?(true)
+      constraints(min_length: 1)
+    end
+
+    attribute :occurred_at, :utc_datetime_usec do
+      allow_nil?(false)
+      public?(true)
+    end
+
+    attribute :summary, :string do
+      allow_nil?(false)
+      public?(true)
+      constraints(min_length: 1)
+    end
+
+    attribute :metadata, :map do
+      allow_nil?(false)
+      public?(true)
+      default(%{})
+    end
+
+    create_timestamp :inserted_at do
+      public?(true)
+    end
+
+    update_timestamp :updated_at do
+      public?(true)
+    end
+  end
+
+  identities do
+    identity(:unique_external_id, [:external_id])
+    identity(:unique_idempotency_key, [:idempotency_key])
+  end
 end
 
 defmodule Conveyor.Domain.Policy do
