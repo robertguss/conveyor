@@ -8,50 +8,21 @@ run_spec_lock_behavior = "reject_overrides"
 [artifact_projection]
 root = "tmp/conveyor_artifacts"
 manifest = "manifest.json"
-include_redacted_findings = true
 
 [sample_repository]
 name = "fastapi_tasks"
 root = "sample_apps/fastapi_tasks"
 plan_fixture = "sample_apps/fastapi_tasks/plans/complete_tasks.md"
-default_code_quality_profile = "sample_noop"
-local_advisory_code_quality_profile = "sample_local_python"
-quality_ref_consumers = ["context_pack", "gate"]
 
 [toolchain.profiles.beam]
 runtime = "elixir"
-otp = "27 or 28"
-image = "hexpm/elixir:1.17.3-erlang-27.3.4-debian-bookworm-20250203-slim"
 
 [toolchain.profiles.python]
 runtime = "python"
-version = "3.12"
-image = "python:3.12-slim"
-
-[policy.profiles.explore]
-autonomy_level = "L1"
-network = "disabled"
-denylist_fixture = "docs/fixtures/policy/denylist_cases.json"
 
 [policy.profiles.implement]
 autonomy_level = "L1"
 network = "disabled"
-denylist_fixture = "docs/fixtures/policy/denylist_cases.json"
-
-[policy.profiles.verify]
-autonomy_level = "L1"
-network = "disabled"
-denylist_fixture = "docs/fixtures/policy/denylist_cases.json"
-
-[policy.profiles.release]
-autonomy_level = "L1"
-network = "disabled"
-denylist_fixture = "docs/fixtures/policy/denylist_cases.json"
-
-[policy.profiles.maintenance]
-autonomy_level = "L1"
-network = "disabled"
-denylist_fixture = "docs/fixtures/policy/denylist_cases.json"
 
 [code_quality.profiles.elixir]
 adapter = "mix"
@@ -61,40 +32,19 @@ checks = ["format", "test"]
 adapter = "python"
 checks = ["py_compile", "plan_audit"]
 
-[code_quality.profiles.sample_noop]
-adapter = "noop"
-mode = "advisory"
-blocking = false
-checks = ["quality_ref"]
-required_tools = []
-required_env_keys = []
-consumers = ["context_pack", "gate"]
-
-[code_quality.profiles.sample_local_python]
-adapter = "local_python"
-mode = "advisory"
-blocking = false
-checks = ["py_compile", "pytest_collect"]
-required_tools = ["python3"]
-required_env_keys = []
-consumers = ["context_pack", "gate"]
-
-[code_quality.profiles.codescent]
+[code_quality.profiles.codescent_blocking]
 adapter = "codescent"
 mode = "blocking"
 blocking = true
 checks = ["codescent_gate"]
-required_tools = ["codescent"]
-required_env_keys = ["CODESCENT_API_KEY"]
-consumers = ["gate"]
 
 [commands.plan_audit]
 executable = "python3"
-argv = ["sample_apps/fastapi_tasks/scripts/plan_audit.py", "sample_apps/fastapi_tasks/plans/complete_tasks.md"]
+argv = ["sample_apps/fastapi_tasks/scripts/plan_audit.py"]
 cwd = "."
 timeout_ms = 30000
 env_keys = []
-read_roots = ["sample_apps/fastapi_tasks", "docs/schemas"]
+read_roots = ["sample_apps/fastapi_tasks"]
 write_roots = ["tmp/conveyor_artifacts"]
 network = "disabled"
 toolchain_profile = "python"
@@ -109,7 +59,7 @@ argv = ["scripts/verify_phase0_docs.py"]
 cwd = "."
 timeout_ms = 30000
 env_keys = []
-read_roots = ["AGENTS.md", "README.md", "TASK_SCHEMA.md", "SAFETY_POLICY.md"]
+read_roots = ["AGENTS.md", "README.md"]
 write_roots = ["tmp/conveyor_artifacts"]
 network = "disabled"
 toolchain_profile = "python"
@@ -124,7 +74,7 @@ argv = ["scripts/check_policy_profiles.py"]
 cwd = "."
 timeout_ms = 30000
 env_keys = []
-read_roots = ["docs/policy", "docs/fixtures/policy", "SAFETY_POLICY.md"]
+read_roots = ["docs/policy", "docs/fixtures/policy"]
 write_roots = ["tmp/conveyor_artifacts"]
 network = "disabled"
 toolchain_profile = "python"

@@ -169,6 +169,56 @@ defmodule Conveyor.Domain.Resources do
   end
 end
 
+defmodule Conveyor.Domain.PayloadHelpers do
+  @moduledoc false
+
+  def fetch_required!(map, key) when is_map(map) do
+    Map.get(map, key) || Map.get(map, to_string(key)) ||
+      raise ArgumentError, "missing required payload field: #{key}"
+  end
+
+  def normalize_map(map) when is_map(map) do
+    Map.new(map, fn {key, value} -> {to_string(key), normalize_value(value)} end)
+  end
+
+  def normalize_map(_map), do: raise(ArgumentError, "payload metadata must be a map")
+
+  def sha256_binary(binary) when is_binary(binary) do
+    "sha256:" <>
+      (:crypto.hash(:sha256, binary)
+       |> Base.encode16(case: :lower))
+  end
+
+  def canonical_sha256(payload) do
+    sha256_binary(canonical_json(payload))
+  end
+
+  def iso8601(%DateTime{} = datetime), do: DateTime.to_iso8601(datetime)
+  def iso8601(value) when is_binary(value), do: value
+
+  defp normalize_value(value) when is_map(value), do: normalize_map(value)
+  defp normalize_value(value) when is_list(value), do: Enum.map(value, &normalize_value/1)
+  defp normalize_value(value), do: value
+
+  defp canonical_json(map) when is_map(map) do
+    map
+    |> Enum.map(fn {key, value} -> {to_string(key), value} end)
+    |> Enum.sort_by(&elem(&1, 0))
+    |> Enum.map_join(",", fn {key, value} ->
+      Jason.encode!(key) <> ":" <> canonical_json(value)
+    end)
+    |> then(&"{#{&1}}")
+  end
+
+  defp canonical_json(list) when is_list(list) do
+    list
+    |> Enum.map_join(",", &canonical_json/1)
+    |> then(&"[#{&1}]")
+  end
+
+  defp canonical_json(value), do: Jason.encode!(value)
+end
+
 defmodule Conveyor.Domain.Project do
   use Conveyor.Domain.ActiveResource, table: "projects"
 end
@@ -195,14 +245,152 @@ end
 
 defmodule Conveyor.Domain.HumanApproval do
   use Conveyor.Domain.ActiveResource, table: "human_approvals"
+
+  @schema_version "conveyor.human_approval@1"
+
+  def record_external_action!(attrs) when is_map(attrs) do
+    %{
+      "schema_version" => @schema_version,
+      "approval_id" => Conveyor.Domain.PayloadHelpers.fetch_required!(attrs, :approval_id),
+      "actor" => Conveyor.Domain.PayloadHelpers.fetch_required!(attrs, :actor),
+      "action" => Conveyor.Domain.PayloadHelpers.fetch_required!(attrs, :action),
+      "target" => Conveyor.Domain.PayloadHelpers.fetch_required!(attrs, :target),
+      "reason" => Conveyor.Domain.PayloadHelpers.fetch_required!(attrs, :reason),
+      "occurred_at" =>
+        attrs
+        |> Conveyor.Domain.PayloadHelpers.fetch_required!(:occurred_at)
+        |> Conveyor.Domain.PayloadHelpers.iso8601(),
+      "manual_external_action" => true,
+      "external_change" =>
+        attrs
+        |> Map.get(:external_change, Map.get(attrs, "external_change", %{}))
+        |> Conveyor.Domain.PayloadHelpers.normalize_map(),
+      "evidence_refs" => Map.get(attrs, :evidence_refs, Map.get(attrs, "evidence_refs", []))
+    }
+  end
+
+  def create_attrs!(attrs) when is_map(attrs) do
+    payload = record_external_action!(attrs)
+
+    %{
+      external_id: payload["approval_id"],
+      name: payload["action"],
+      status: "active",
+      payload: payload
+    }
+  end
 end
 
 defmodule Conveyor.Domain.ExternalChange do
   use Conveyor.Domain.ActiveResource, table: "external_changes"
+
+  @schema_version "conveyor.external_change@1"
+
+  def record!(attrs) when is_map(attrs) do
+    %{
+      "schema_version" => @schema_version,
+      "change_id" => Conveyor.Domain.PayloadHelpers.fetch_required!(attrs, :change_id),
+      "system" => Conveyor.Domain.PayloadHelpers.fetch_required!(attrs, :system),
+      "change_type" => Conveyor.Domain.PayloadHelpers.fetch_required!(attrs, :change_type),
+      "actor" => Conveyor.Domain.PayloadHelpers.fetch_required!(attrs, :actor),
+      "summary" => Conveyor.Domain.PayloadHelpers.fetch_required!(attrs, :summary),
+      "occurred_at" =>
+        attrs
+        |> Conveyor.Domain.PayloadHelpers.fetch_required!(:occurred_at)
+        |> Conveyor.Domain.PayloadHelpers.iso8601(),
+      "metadata" =>
+        attrs
+        |> Map.get(:metadata, Map.get(attrs, "metadata", %{}))
+        |> Conveyor.Domain.PayloadHelpers.normalize_map()
+    }
+  end
+
+  def create_attrs!(attrs) when is_map(attrs) do
+    payload = record!(attrs)
+
+    %{
+      external_id: payload["change_id"],
+      name: payload["summary"],
+      status: "active",
+      payload: payload
+    }
+  end
 end
 
 defmodule Conveyor.Domain.PatchEquivalence do
   use Conveyor.Domain.ActiveResource, table: "patch_equivalences"
+
+  @schema_version "conveyor.patch_equivalence@1"
+  @classifications [
+    "exact",
+    "equivalent_with_human_edits",
+    "divergent",
+    "partial",
+    "unknown"
+  ]
+
+  def classifications, do: @classifications
+
+  def classify(attrs) when is_map(attrs) do
+    expected = Map.get(attrs, :expected_patch_sha256, Map.get(attrs, "expected_patch_sha256"))
+    applied = Map.get(attrs, :applied_patch_sha256, Map.get(attrs, "applied_patch_sha256"))
+    matched_hunks = Map.get(attrs, :matched_hunks, Map.get(attrs, "matched_hunks", 0))
+    unmatched_hunks = Map.get(attrs, :unmatched_hunks, Map.get(attrs, "unmatched_hunks", 0))
+    human_edits? = Map.get(attrs, :human_edits, Map.get(attrs, "human_edits", false))
+    tests_passed? = Map.get(attrs, :tests_passed, Map.get(attrs, "tests_passed", false))
+
+    semantic_equivalence? =
+      Map.get(attrs, :semantic_equivalence, Map.get(attrs, "semantic_equivalence", false))
+
+    cond do
+      is_binary(expected) and expected == applied ->
+        "exact"
+
+      human_edits? and tests_passed? and semantic_equivalence? ->
+        "equivalent_with_human_edits"
+
+      matched_hunks > 0 and unmatched_hunks > 0 ->
+        "partial"
+
+      is_binary(expected) and is_binary(applied) ->
+        "divergent"
+
+      true ->
+        "unknown"
+    end
+  end
+
+  def record!(attrs) when is_map(attrs) do
+    classification = classify(attrs)
+
+    %{
+      "schema_version" => @schema_version,
+      "equivalence_id" => Conveyor.Domain.PayloadHelpers.fetch_required!(attrs, :equivalence_id),
+      "expected_patch_sha256" =>
+        Map.get(attrs, :expected_patch_sha256, Map.get(attrs, "expected_patch_sha256")),
+      "applied_patch_sha256" =>
+        Map.get(attrs, :applied_patch_sha256, Map.get(attrs, "applied_patch_sha256")),
+      "classification" => classification,
+      "matched_hunks" => Map.get(attrs, :matched_hunks, Map.get(attrs, "matched_hunks", 0)),
+      "unmatched_hunks" => Map.get(attrs, :unmatched_hunks, Map.get(attrs, "unmatched_hunks", 0)),
+      "human_edits" => Map.get(attrs, :human_edits, Map.get(attrs, "human_edits", false)),
+      "tests_passed" => Map.get(attrs, :tests_passed, Map.get(attrs, "tests_passed", false)),
+      "semantic_equivalence" =>
+        Map.get(attrs, :semantic_equivalence, Map.get(attrs, "semantic_equivalence", false)),
+      "finding_code" => "patch_equivalence_#{classification}"
+    }
+  end
+
+  def create_attrs!(attrs) when is_map(attrs) do
+    payload = record!(attrs)
+
+    %{
+      external_id: payload["equivalence_id"],
+      name: payload["classification"],
+      status: "active",
+      payload: payload
+    }
+  end
 end
 
 defmodule Conveyor.Domain.PlanAudit do
@@ -500,10 +688,118 @@ end
 
 defmodule Conveyor.Domain.Artifact do
   use Conveyor.Domain.ActiveResource, table: "artifacts"
+
+  @schema_version "conveyor.artifact@1"
+  @sensitivity_levels ["public", "internal", "confidential", "secret"]
+
+  def sensitivity_levels, do: @sensitivity_levels
+
+  def build!(attrs) when is_map(attrs) do
+    content = Conveyor.Domain.PayloadHelpers.fetch_required!(attrs, :content)
+    sensitivity = Map.get(attrs, :sensitivity, Map.get(attrs, "sensitivity", "internal"))
+
+    if sensitivity not in @sensitivity_levels do
+      raise ArgumentError, "unknown artifact sensitivity: #{inspect(sensitivity)}"
+    end
+
+    %{
+      "schema_version" => @schema_version,
+      "artifact_key" => Conveyor.Domain.PayloadHelpers.fetch_required!(attrs, :artifact_key),
+      "sha256" => Conveyor.Domain.PayloadHelpers.sha256_binary(content),
+      "size_bytes" => byte_size(content),
+      "content_type" =>
+        Map.get(attrs, :content_type, Map.get(attrs, "content_type", "application/octet-stream")),
+      "sensitivity" => sensitivity,
+      "blob_uri" => Conveyor.Domain.PayloadHelpers.fetch_required!(attrs, :blob_uri),
+      "metadata" =>
+        attrs
+        |> Map.get(:metadata, Map.get(attrs, "metadata", %{}))
+        |> Conveyor.Domain.PayloadHelpers.normalize_map()
+    }
+  end
+
+  def create_attrs!(attrs) when is_map(attrs) do
+    payload = build!(attrs)
+
+    %{
+      external_id: payload["sha256"],
+      name: payload["artifact_key"],
+      status: "active",
+      payload: payload
+    }
+  end
+
+  def summary(payload) when is_map(payload) do
+    %{
+      schema_version: "conveyor.artifact_summary@1",
+      category: "content_addressed_artifact",
+      artifact_key: payload["artifact_key"],
+      sha256: payload["sha256"],
+      sensitivity: payload["sensitivity"],
+      size_bytes: payload["size_bytes"]
+    }
+  end
 end
 
 defmodule Conveyor.Domain.RunBundle do
   use Conveyor.Domain.ActiveResource, table: "run_bundles"
+
+  @schema_version "conveyor.run_bundle@1"
+
+  def build!(attrs) when is_map(attrs) do
+    artifacts =
+      attrs
+      |> Conveyor.Domain.PayloadHelpers.fetch_required!(:artifacts)
+      |> Enum.map(&artifact_sha256!/1)
+      |> Enum.sort()
+
+    unsigned = %{
+      "schema_version" => @schema_version,
+      "bundle_key" => Conveyor.Domain.PayloadHelpers.fetch_required!(attrs, :bundle_key),
+      "run_spec_sha256" =>
+        Conveyor.Domain.PayloadHelpers.fetch_required!(attrs, :run_spec_sha256),
+      "artifact_sha256s" => artifacts,
+      "metadata" =>
+        attrs
+        |> Map.get(:metadata, Map.get(attrs, "metadata", %{}))
+        |> Conveyor.Domain.PayloadHelpers.normalize_map()
+    }
+
+    Map.put(
+      unsigned,
+      "run_bundle_sha256",
+      Conveyor.Domain.PayloadHelpers.canonical_sha256(unsigned)
+    )
+  end
+
+  def create_attrs!(attrs) when is_map(attrs) do
+    payload = build!(attrs)
+
+    %{
+      external_id: payload["run_bundle_sha256"],
+      name: payload["bundle_key"],
+      status: "active",
+      payload: payload
+    }
+  end
+
+  def summary(payload) when is_map(payload) do
+    %{
+      schema_version: "conveyor.run_bundle_summary@1",
+      category: "run_bundle_projection",
+      bundle_key: payload["bundle_key"],
+      run_bundle_sha256: payload["run_bundle_sha256"],
+      run_spec_sha256: payload["run_spec_sha256"],
+      artifact_count: length(payload["artifact_sha256s"] || [])
+    }
+  end
+
+  defp artifact_sha256!(artifact) when is_binary(artifact), do: artifact
+
+  defp artifact_sha256!(artifact) when is_map(artifact) do
+    Map.get(artifact, "sha256") || Map.get(artifact, :sha256) ||
+      raise ArgumentError, "artifact is missing sha256"
+  end
 end
 
 defmodule Conveyor.Domain.ReviewerHealth do
@@ -652,6 +948,56 @@ end
 
 defmodule Conveyor.Domain.RetentionPolicy do
   use Conveyor.Domain.ActiveResource, table: "retention_policies"
+
+  @schema_version "conveyor.retention_policy@1"
+  @decisions ["retain", "eligible_for_review", "requires_human_approval"]
+
+  def decisions, do: @decisions
+
+  def build!(attrs) when is_map(attrs) do
+    %{
+      "schema_version" => @schema_version,
+      "policy_key" => Conveyor.Domain.PayloadHelpers.fetch_required!(attrs, :policy_key),
+      "retain_for_days" =>
+        Conveyor.Domain.PayloadHelpers.fetch_required!(attrs, :retain_for_days),
+      "sensitivity" => Map.get(attrs, :sensitivity, Map.get(attrs, "sensitivity", "internal")),
+      "delete_requires_human_approval" =>
+        Map.get(
+          attrs,
+          :delete_requires_human_approval,
+          Map.get(attrs, "delete_requires_human_approval", true)
+        ),
+      "metadata" =>
+        attrs
+        |> Map.get(:metadata, Map.get(attrs, "metadata", %{}))
+        |> Conveyor.Domain.PayloadHelpers.normalize_map()
+    }
+  end
+
+  def create_attrs!(attrs) when is_map(attrs) do
+    payload = build!(attrs)
+
+    %{
+      external_id: payload["policy_key"],
+      name: payload["policy_key"],
+      status: "active",
+      payload: payload
+    }
+  end
+
+  def decision(policy_payload, artifact_payload)
+      when is_map(policy_payload) and is_map(artifact_payload) do
+    cond do
+      policy_payload["delete_requires_human_approval"] ->
+        "requires_human_approval"
+
+      artifact_payload["sensitivity"] in ["confidential", "secret"] ->
+        "eligible_for_review"
+
+      true ->
+        "retain"
+    end
+  end
 end
 
 defmodule Conveyor.Domain.RunBudget do

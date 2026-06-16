@@ -1,19 +1,63 @@
 {
   "schema_version": "conveyor.plan@1",
   "plan_id": "plan-phase1-demo",
-  "title": "Phase 1 evidence-only demo",
+  "title": "Phase 1 sample task demo",
+  "project": {
+    "key": "fastapi_tasks",
+    "name": "FastAPI Tasks",
+    "repository": "sample_apps/fastapi_tasks"
+  },
   "autonomy_level": "L1",
   "cutline": "TRACER_REQUIRED",
-  "tasks": [
+  "requirements": [
     {
-      "task_id": "task-001",
+      "requirement_id": "REQ-001",
       "title": "Run sample tracer",
-      "acceptance": [
-        "All station outputs are captured in the run bundle."
-      ],
-      "evidence_required": [
-        "command transcript"
+      "acceptance_criteria": [
+        {
+          "ac_id": "AC-001",
+          "text": "All station outputs are captured in the run bundle."
+        }
       ]
+    }
+  ],
+  "verification_commands": [
+    {
+      "command_id": "VERIFY-001",
+      "command": [
+        "mix",
+        "test"
+      ]
+    }
+  ],
+  "decisions": [
+    {
+      "decision_id": "DEC-001",
+      "title": "Keep autonomy at L1",
+      "rationale": "The Phase 1 tracer produces evidence and patches but does not merge or deploy."
+    }
+  ],
+  "slices": [
+    {
+      "slice_id": "SLICE-001",
+      "title": "Run the bounded sample tracer",
+      "requirement_refs": [
+        "REQ-001"
+      ],
+      "decision_refs": [
+        "DEC-001"
+      ],
+      "verification_refs": [
+        "VERIFY-001"
+      ],
+      "likely_files": [
+        "sample_apps/fastapi_tasks/src/fastapi_tasks/app.py"
+      ],
+      "conflict_domains": [
+        "sample-app",
+        "evidence"
+      ],
+      "autonomy_level": "L1"
     }
   ]
 }

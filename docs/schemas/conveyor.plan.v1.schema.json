@@ -2,17 +2,22 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://conveyor.local/schemas/conveyor.plan@1",
   "title": "Conveyor Human Plan",
-  "description": "Phase 0/1 human-authored plan contract consumed by Conveyor's deterministic conductor.",
+  "description": "Phase 0/1 normalized human-authored plan contract consumed by Conveyor's deterministic conductor.",
   "type": "object",
   "additionalProperties": false,
   "required": [
     "schema_version",
     "plan_id",
     "title",
-    "objective",
+    "project",
+    "goal",
+    "non_goals",
     "autonomy_level",
     "cutline",
-    "tasks"
+    "requirements",
+    "verification_commands",
+    "decisions",
+    "slices"
   ],
   "properties": {
     "schema_version": {
@@ -26,9 +31,39 @@
       "type": "string",
       "minLength": 1
     },
-    "objective": {
+    "project": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "key",
+        "name",
+        "repository"
+      ],
+      "properties": {
+        "key": {
+          "type": "string",
+          "minLength": 1
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "repository": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "goal": {
       "type": "string",
       "minLength": 1
+    },
+    "non_goals": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
     },
     "autonomy_level": {
       "enum": [
@@ -45,20 +80,19 @@
         "TRUST_REQUIRED"
       ]
     },
-    "tasks": {
+    "requirements": {
       "type": "array",
       "minItems": 1,
       "items": {
         "type": "object",
         "additionalProperties": false,
         "required": [
-          "task_id",
+          "requirement_id",
           "title",
-          "acceptance",
-          "evidence_required"
+          "acceptance_criteria"
         ],
         "properties": {
-          "task_id": {
+          "requirement_id": {
             "type": "string",
             "minLength": 1
           },
@@ -66,7 +100,109 @@
             "type": "string",
             "minLength": 1
           },
-          "acceptance": {
+          "acceptance_criteria": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "ac_id",
+                "text"
+              ],
+              "properties": {
+                "ac_id": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "text": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "verification_commands": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "command_id",
+          "command"
+        ],
+        "properties": {
+          "command_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "command": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        }
+      }
+    },
+    "decisions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "decision_id",
+          "title",
+          "rationale"
+        ],
+        "properties": {
+          "decision_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "title": {
+            "type": "string",
+            "minLength": 1
+          },
+          "rationale": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    },
+    "slices": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "slice_id",
+          "title",
+          "requirement_refs",
+          "decision_refs",
+          "verification_refs",
+          "likely_files",
+          "conflict_domains",
+          "autonomy_level"
+        ],
+        "properties": {
+          "slice_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "title": {
+            "type": "string",
+            "minLength": 1
+          },
+          "requirement_refs": {
             "type": "array",
             "minItems": 1,
             "items": {
@@ -74,13 +210,45 @@
               "minLength": 1
             }
           },
-          "evidence_required": {
+          "decision_refs": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "verification_refs": {
             "type": "array",
             "minItems": 1,
             "items": {
               "type": "string",
               "minLength": 1
             }
+          },
+          "likely_files": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "conflict_domains": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "autonomy_level": {
+            "enum": [
+              "L0",
+              "L1",
+              "L2",
+              "L3",
+              "L4"
+            ]
           }
         }
       }

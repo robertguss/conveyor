@@ -14,6 +14,9 @@ include_redacted_findings = true
 name = "fastapi_tasks"
 root = "sample_apps/fastapi_tasks"
 plan_fixture = "sample_apps/fastapi_tasks/plans/valid_plan.json"
+default_code_quality_profile = "sample_noop"
+local_advisory_code_quality_profile = "sample_local_python"
+quality_ref_consumers = ["context_pack", "gate"]
 
 [toolchain.profiles.beam]
 runtime = "elixir"
@@ -58,6 +61,33 @@ checks = ["format", "test"]
 adapter = "python"
 checks = ["py_compile", "plan_audit"]
 
+[code_quality.profiles.sample_noop]
+adapter = "noop"
+mode = "advisory"
+blocking = false
+checks = ["quality_ref"]
+required_tools = []
+required_env_keys = []
+consumers = ["context_pack", "gate"]
+
+[code_quality.profiles.sample_local_python]
+adapter = "local_python"
+mode = "advisory"
+blocking = false
+checks = ["py_compile", "pytest_collect"]
+required_tools = ["python3"]
+required_env_keys = []
+consumers = ["context_pack", "gate"]
+
+[code_quality.profiles.codescent]
+adapter = "codescent"
+mode = "blocking"
+blocking = true
+checks = ["codescent_gate"]
+required_tools = ["codescent"]
+required_env_keys = ["CODESCENT_API_KEY"]
+consumers = ["gate"]
+
 [commands.plan_audit]
 executable = "python3"
 argv = ["sample_apps/fastapi_tasks/scripts/plan_audit.py", "sample_apps/fastapi_tasks/plans/complete_tasks.md"]
@@ -75,17 +105,17 @@ consumers = ["plan_audit"]
 
 [commands.agents_md]
 executable = "python3"
-argv = ["scripts/verify_phase0_docs.py"]
+argv = ["scripts/agents_md_contract.py", "--self-test", "--output", "tmp/agents_md_contract/agents_md_generation.json", "--generated-output", "tmp/agents_md_contract/generated_AGENTS.md"]
 cwd = "."
 timeout_ms = 30000
 env_keys = []
-read_roots = ["AGENTS.md", "README.md", "TASK_SCHEMA.md", "SAFETY_POLICY.md"]
-write_roots = ["tmp/conveyor_artifacts"]
+read_roots = ["AGENTS.md", "README.md", "TASK_SCHEMA.md", "SAFETY_POLICY.md", ".conveyor/config.toml", "docs/policy/profiles.json"]
+write_roots = ["tmp/agents_md_contract"]
 network = "disabled"
 toolchain_profile = "python"
 policy_profile = "implement"
 code_quality_profile = "python"
-artifact_path = "tmp/conveyor_artifacts/agents_md_generation.json"
+artifact_path = "tmp/agents_md_contract/agents_md_generation.json"
 consumers = ["agents_md"]
 
 [commands.policy]

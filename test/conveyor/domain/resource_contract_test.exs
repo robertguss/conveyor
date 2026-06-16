@@ -1,21 +1,16 @@
 defmodule Conveyor.Domain.ResourceContractTest do
   use ExUnit.Case, async: false
 
-  @resources Conveyor.Domain.Resources.resource_modules()
-  @tables Conveyor.Domain.Resources.table_names()
-  @append_only_resources Conveyor.Domain.Resources.append_only_resources()
-  @mutable_resources @resources -- @append_only_resources
-
   test "registers every active Phase 0/1 resource in the Ash domain" do
     registered = Ash.Domain.Info.resources(Conveyor.Domain) |> MapSet.new()
 
-    assert MapSet.new(@resources) == registered
+    assert MapSet.new(resources()) == registered
   end
 
   test "tracks the backing table for every active resource" do
-    assert length(@resources) == 46
-    assert length(@tables) == 46
-    assert length(Enum.uniq(@tables)) == 46
+    assert length(resources()) == 46
+    assert length(tables()) == 46
+    assert length(Enum.uniq(tables())) == 46
   end
 
   test "emits structured migration and guard evidence logs" do
@@ -42,7 +37,7 @@ defmodule Conveyor.Domain.ResourceContractTest do
   end
 
   test "mutable resources support Ash create, read, and update actions" do
-    for resource <- @mutable_resources do
+    for resource <- mutable_resources() do
       suffix = resource |> Module.split() |> List.last() |> Macro.underscore()
 
       attrs = %{
@@ -69,7 +64,7 @@ defmodule Conveyor.Domain.ResourceContractTest do
   end
 
   test "immutable external ids are guarded by the update action" do
-    for resource <- @mutable_resources do
+    for resource <- mutable_resources() do
       suffix = resource |> Module.split() |> List.last() |> Macro.underscore()
 
       assert {:ok, record} =
@@ -87,7 +82,7 @@ defmodule Conveyor.Domain.ResourceContractTest do
   end
 
   test "append-only resources do not expose update or destroy actions" do
-    for resource <- @append_only_resources do
+    for resource <- append_only_resources() do
       assert Ash.Resource.Info.action(resource, :create)
       assert Ash.Resource.Info.action(resource, :read)
       refute Ash.Resource.Info.action(resource, :update)
@@ -163,6 +158,189 @@ defmodule Conveyor.Domain.ResourceContractTest do
 
     assert Exception.message(error) =~ "payload"
   end
+
+  test "artifact and bundle resources use content-addressed evidence identity" do
+    artifact_attrs =
+      Conveyor.Domain.Artifact.create_attrs!(%{
+        artifact_key: "baseline-summary",
+        content: ~s({"status":"passed"}),
+        content_type: "application/json",
+        sensitivity: "internal",
+        blob_uri: "file://artifacts/baseline-summary.json",
+        metadata: %{suite: "baseline_regression"}
+      })
+
+    assert %{external_id: "sha256:" <> _, payload: artifact_payload} = artifact_attrs
+    assert artifact_attrs.external_id == artifact_payload["sha256"]
+    assert artifact_payload["artifact_key"] == "baseline-summary"
+    assert artifact_payload["sensitivity"] == "internal"
+    assert artifact_payload["size_bytes"] == byte_size(~s({"status":"passed"}))
+
+    assert %{
+             schema_version: "conveyor.artifact_summary@1",
+             category: "content_addressed_artifact",
+             sha256: artifact_sha256,
+             sensitivity: "internal"
+           } = Conveyor.Domain.Artifact.summary(artifact_payload)
+
+    assert artifact_sha256 == artifact_attrs.external_id
+
+    assert {:ok, artifact_record} =
+             Ash.create(Conveyor.Domain.Artifact, artifact_attrs, action: :create)
+
+    run_bundle_attrs =
+      Conveyor.Domain.RunBundle.create_attrs!(%{
+        bundle_key: "run-phase1-demo-bundle",
+        run_spec_sha256: "sha256:run-spec-demo",
+        artifacts: [artifact_record.payload],
+        metadata: %{station: "evidence"}
+      })
+
+    assert %{external_id: "sha256:" <> _, payload: bundle_payload} = run_bundle_attrs
+    assert run_bundle_attrs.external_id == bundle_payload["run_bundle_sha256"]
+    assert bundle_payload["artifact_sha256s"] == [artifact_sha256]
+
+    assert %{
+             schema_version: "conveyor.run_bundle_summary@1",
+             category: "run_bundle_projection",
+             artifact_count: 1,
+             run_spec_sha256: "sha256:run-spec-demo"
+           } = Conveyor.Domain.RunBundle.summary(bundle_payload)
+
+    assert {:ok, _bundle_record} =
+             Ash.create(Conveyor.Domain.RunBundle, run_bundle_attrs, action: :create)
+  end
+
+  test "retention and approval resources record manual external actions" do
+    artifact_payload =
+      Conveyor.Domain.Artifact.build!(%{
+        artifact_key: "human-dossier",
+        content: "approval evidence",
+        sensitivity: "confidential",
+        blob_uri: "file://artifacts/human-dossier.md"
+      })
+
+    retention_policy =
+      Conveyor.Domain.RetentionPolicy.build!(%{
+        policy_key: "phase1-human-dossier",
+        retain_for_days: 30,
+        sensitivity: "confidential",
+        delete_requires_human_approval: true
+      })
+
+    assert Conveyor.Domain.RetentionPolicy.decision(retention_policy, artifact_payload) ==
+             "requires_human_approval"
+
+    external_change =
+      Conveyor.Domain.ExternalChange.record!(%{
+        change_id: "external-change-001",
+        system: "github",
+        change_type: "manual_label",
+        actor: "reviewer@example.com",
+        summary: "Reviewer applied an external triage label.",
+        occurred_at: ~U[2026-06-16 21:00:00Z],
+        metadata: %{label: "needs-human-review"}
+      })
+
+    approval_attrs =
+      Conveyor.Domain.HumanApproval.create_attrs!(%{
+        approval_id: "approval-001",
+        actor: "reviewer@example.com",
+        action: "approve_manual_external_change",
+        target: "github:conveyor/pull/1",
+        reason: "External label records a human review decision.",
+        occurred_at: ~U[2026-06-16 21:01:00Z],
+        external_change: external_change,
+        evidence_refs: [artifact_payload["sha256"]]
+      })
+
+    assert %{
+             "manual_external_action" => true,
+             "external_change" => %{"change_id" => "external-change-001"},
+             "evidence_refs" => [artifact_sha256]
+           } = approval_attrs.payload
+
+    assert artifact_sha256 == artifact_payload["sha256"]
+
+    assert {:ok, _change_record} =
+             Ash.create(
+               Conveyor.Domain.ExternalChange,
+               Conveyor.Domain.ExternalChange.create_attrs!(%{
+                 change_id: "external-change-001-db",
+                 system: "github",
+                 change_type: "manual_label",
+                 actor: "reviewer@example.com",
+                 summary: "Reviewer applied an external triage label.",
+                 occurred_at: ~U[2026-06-16 21:00:00Z]
+               }),
+               action: :create
+             )
+
+    assert {:ok, approval_record} =
+             Ash.create(Conveyor.Domain.HumanApproval, approval_attrs, action: :create)
+
+    assert approval_record.payload["manual_external_action"]
+  end
+
+  test "patch equivalence records every post-integration classification" do
+    cases = [
+      {"exact",
+       %{expected_patch_sha256: "sha256:expected", applied_patch_sha256: "sha256:expected"}},
+      {
+        "equivalent_with_human_edits",
+        %{
+          expected_patch_sha256: "sha256:expected",
+          applied_patch_sha256: "sha256:human-edited",
+          human_edits: true,
+          tests_passed: true,
+          semantic_equivalence: true
+        }
+      },
+      {"divergent",
+       %{expected_patch_sha256: "sha256:expected", applied_patch_sha256: "sha256:other"}},
+      {
+        "partial",
+        %{
+          expected_patch_sha256: "sha256:expected",
+          applied_patch_sha256: "sha256:partial",
+          matched_hunks: 2,
+          unmatched_hunks: 1
+        }
+      },
+      {"unknown", %{}}
+    ]
+
+    assert Enum.map(cases, &elem(&1, 0)) == Conveyor.Domain.PatchEquivalence.classifications()
+
+    for {expected, attrs} <- cases do
+      attrs = Map.put(attrs, :equivalence_id, "patch-equivalence-#{expected}")
+
+      assert Conveyor.Domain.PatchEquivalence.classify(attrs) == expected
+
+      record = Conveyor.Domain.PatchEquivalence.record!(attrs)
+
+      assert record["classification"] == expected
+      assert record["finding_code"] == "patch_equivalence_#{expected}"
+    end
+
+    assert {:ok, record} =
+             Ash.create(
+               Conveyor.Domain.PatchEquivalence,
+               Conveyor.Domain.PatchEquivalence.create_attrs!(%{
+                 equivalence_id: "patch-equivalence-db",
+                 expected_patch_sha256: "sha256:expected",
+                 applied_patch_sha256: "sha256:expected"
+               }),
+               action: :create
+             )
+
+    assert record.payload["classification"] == "exact"
+  end
+
+  defp resources, do: Conveyor.Domain.Resources.resource_modules()
+  defp tables, do: Conveyor.Domain.Resources.table_names()
+  defp append_only_resources, do: Conveyor.Domain.Resources.append_only_resources()
+  defp mutable_resources, do: resources() -- append_only_resources()
 
   defp run_spec_attrs(overrides \\ %{}) do
     %{

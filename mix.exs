@@ -45,7 +45,8 @@ defmodule Conveyor.MixProject do
       {:phoenix_live_view, "~> 1.2"},
       {:postgrex, "~> 0.22"},
       {:telemetry_metrics, "~> 1.1"},
-      {:telemetry_poller, "~> 1.3"}
+      {:telemetry_poller, "~> 1.3"},
+      {:yaml_elixir, "~> 2.12"}
     ]
   end
 

@@ -1,0 +1,160 @@
+version = 1
+project_key = "conveyor-fastapi-tasks-sample"
+default_toolchain_profile = "python"
+default_policy_profile = "implement"
+default_code_quality_profile = "sample_local_python"
+run_spec_lock_behavior = "reject_overrides"
+
+[artifact_projection]
+root = "artifacts"
+manifest = "manifest.json"
+include_redacted_findings = true
+
+[agents_md.section_rules]
+"Overview" = ["FastAPI Tasks sample", "Conveyor", "Phase 1"]
+"Architecture Map" = ["fastapi_tasks.app", "TaskStore", "baseline_regression", "plans/complete_tasks.md"]
+"Testing and Verification" = ["UBS", "pytest", "plan_audit"]
+
+[toolchain.profiles.python]
+runtime = "python"
+version = "3.12"
+image = "python:3.12-slim"
+
+[policy.profiles.implement]
+autonomy_level = "L1"
+network = "disabled"
+denylist_fixture = "../../docs/fixtures/policy/denylist_cases.json"
+
+[policy.profiles.verify]
+autonomy_level = "L1"
+network = "disabled"
+denylist_fixture = "../../docs/fixtures/policy/denylist_cases.json"
+
+[code_quality.profiles.sample_local_python]
+adapter = "local_python"
+mode = "advisory"
+blocking = false
+checks = ["py_compile", "pytest_collect", "plan_audit"]
+required_tools = ["uv", "python3"]
+required_env_keys = []
+consumers = ["context_pack", "gate"]
+
+[commands.install]
+executable = "uv"
+argv = ["sync", "--frozen", "--extra", "test"]
+cwd = "."
+timeout_ms = 120000
+env_keys = []
+read_roots = ["pyproject.toml", "uv.lock"]
+write_roots = [".venv"]
+network = "disabled"
+toolchain_profile = "python"
+policy_profile = "implement"
+code_quality_profile = "sample_local_python"
+artifact_path = "artifacts/install-summary.json"
+consumers = ["developer_setup"]
+
+[commands.build]
+executable = "uv"
+argv = ["run", "--extra", "test", "python", "-m", "compileall", "src"]
+cwd = "."
+timeout_ms = 30000
+env_keys = []
+read_roots = ["src", "pyproject.toml", "uv.lock"]
+write_roots = ["src"]
+network = "disabled"
+toolchain_profile = "python"
+policy_profile = "verify"
+code_quality_profile = "sample_local_python"
+artifact_path = "artifacts/build-summary.json"
+consumers = ["gate"]
+
+[commands.test]
+executable = "./scripts/run_baseline.sh"
+argv = []
+cwd = "."
+timeout_ms = 120000
+env_keys = ["RUN_ID", "BASELINE_OUT_DIR", "PYTHON_BIN"]
+read_roots = ["src", "tests/baseline_regression", "scripts/run_baseline.sh", "pyproject.toml", "uv.lock"]
+write_roots = ["artifacts"]
+network = "disabled"
+toolchain_profile = "python"
+policy_profile = "verify"
+code_quality_profile = "sample_local_python"
+artifact_path = "artifacts/<RUN_ID>/baseline-summary.json"
+consumers = ["baseline_regression", "gate"]
+
+[commands.typecheck]
+executable = "uv"
+argv = ["run", "--extra", "test", "python", "-m", "compileall", "src", "tests", "scripts"]
+cwd = "."
+timeout_ms = 30000
+env_keys = []
+read_roots = ["src", "tests", "scripts", "pyproject.toml", "uv.lock"]
+write_roots = ["src", "tests", "scripts"]
+network = "disabled"
+toolchain_profile = "python"
+policy_profile = "verify"
+code_quality_profile = "sample_local_python"
+artifact_path = "artifacts/typecheck-summary.json"
+consumers = ["gate"]
+
+[commands.lint]
+executable = "uv"
+argv = ["run", "--extra", "test", "python", "-m", "pytest", "--collect-only", "-q", "tests"]
+cwd = "."
+timeout_ms = 30000
+env_keys = []
+read_roots = ["src", "tests", "pyproject.toml", "uv.lock"]
+write_roots = [".pytest_cache"]
+network = "disabled"
+toolchain_profile = "python"
+policy_profile = "verify"
+code_quality_profile = "sample_local_python"
+artifact_path = "artifacts/pytest-collect-summary.json"
+consumers = ["context_pack", "gate"]
+
+[commands.run_app]
+executable = "uv"
+argv = ["run", "--extra", "test", "python", "-m", "uvicorn", "fastapi_tasks.app:app", "--host", "127.0.0.1", "--port", "8000"]
+cwd = "."
+timeout_ms = 0
+env_keys = []
+read_roots = ["src", "pyproject.toml", "uv.lock"]
+write_roots = []
+network = "disabled"
+toolchain_profile = "python"
+policy_profile = "implement"
+code_quality_profile = "sample_local_python"
+artifact_path = "artifacts/run-app-transcript.log"
+consumers = ["developer_setup"]
+
+[commands.plan_audit]
+executable = "uv"
+argv = ["run", "--extra", "test", "python", "scripts/plan_audit.py", "plans/complete_tasks.md"]
+cwd = "."
+timeout_ms = 30000
+env_keys = []
+read_roots = ["plans/complete_tasks.md", "scripts/plan_audit.py", "../../docs/schemas"]
+write_roots = ["artifacts"]
+network = "disabled"
+toolchain_profile = "python"
+policy_profile = "verify"
+code_quality_profile = "sample_local_python"
+artifact_path = "artifacts/plan-audit.json"
+consumers = ["plan_audit", "context_pack"]
+
+[commands.agents_md]
+executable = "python3"
+argv = ["../../scripts/agents_md_contract.py", "--config", ".conveyor/config.toml", "--policy", "../../docs/policy/profiles.json", "--target", "AGENTS.md", "--lint-target", "--self-test", "--output", "artifacts/agents_md_lint.json"]
+cwd = "."
+timeout_ms = 30000
+env_keys = []
+read_roots = ["AGENTS.md", ".conveyor/config.toml", "../../docs/policy/profiles.json", "../../scripts/agents_md_contract.py"]
+write_roots = ["artifacts"]
+network = "disabled"
+toolchain_profile = "python"
+policy_profile = "verify"
+code_quality_profile = "sample_local_python"
+artifact_path = "artifacts/agents_md_lint.json"
+consumers = ["agents_md", "context_pack"]

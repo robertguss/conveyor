@@ -27,6 +27,17 @@ cd sample_apps/fastapi_tasks
 It emits a timestamped local evidence directory containing `pytest-junit.xml`,
 `pytest.log`, and `baseline-summary.json`.
 
+## Quality Adapter Evidence
+
+The default demo uses the `sample_noop` quality profile. It emits advisory
+quality references for ContextPack and gate artifacts without requiring
+CodeScent, live provider credentials, or optional commercial tooling.
+
+The `sample_local_python` profile is available for advisory local checks when
+`python3` is installed. Blocking profiles, such as an advanced CodeScent
+configuration, must explicitly declare both required tools and required
+credential environment variables before a gate can depend on them.
+
 ## RunSpec Input
 
 The machine-readable RunSpec input lives at

@@ -22,6 +22,26 @@ defmodule Conveyor.ProjectConfigTest do
     assert [%{"id" => "agents_md"}] = ProjectConfig.commands_for(config, "agents_md")
     assert [%{"id" => "policy"}] = ProjectConfig.commands_for(config, "policy")
     assert [%{"id" => "verify"}] = ProjectConfig.commands_for(config, "verification")
+
+    assert config.sample_repository["default_code_quality_profile"] == "sample_noop"
+
+    assert config.sample_repository["local_advisory_code_quality_profile"] ==
+             "sample_local_python"
+
+    assert config.sample_repository["quality_ref_consumers"] == ["context_pack", "gate"]
+
+    assert config.code_quality_profiles["sample_noop"]["adapter"] == "noop"
+    assert config.code_quality_profiles["sample_noop"]["mode"] == "advisory"
+    assert config.code_quality_profiles["sample_noop"]["blocking"] == false
+
+    assert config.code_quality_profiles["sample_local_python"]["adapter"] == "local_python"
+    assert config.code_quality_profiles["sample_local_python"]["required_tools"] == ["python3"]
+    assert config.code_quality_profiles["sample_local_python"]["blocking"] == false
+
+    assert config.code_quality_profiles["codescent"]["adapter"] == "codescent"
+    assert config.code_quality_profiles["codescent"]["blocking"] == true
+    assert config.code_quality_profiles["codescent"]["required_tools"] == ["codescent"]
+    assert config.code_quality_profiles["codescent"]["required_env_keys"] == ["CODESCENT_API_KEY"]
   end
 
   test "rejects malformed config with actionable parse findings" do
@@ -47,6 +67,23 @@ defmodule Conveyor.ProjectConfigTest do
 
     assert "duplicate_section" in finding_codes(event)
     assert Enum.any?(event.findings, &(&1.path == "policy.profiles.implement"))
+  end
+
+  test "rejects blocking quality adapters without explicit requirements" do
+    assert {:error, event} =
+             ProjectConfig.load(fixture("blocking_quality_missing_requirements.toml"))
+
+    assert "blocking_quality_requirements_not_explicit" in finding_codes(event)
+
+    assert Enum.any?(event.findings, fn finding ->
+             finding.code == "blocking_quality_requirements_not_explicit" and
+               finding.path == "code_quality.profiles.codescent_blocking.required_tools"
+           end)
+
+    assert Enum.any?(event.findings, fn finding ->
+             finding.code == "blocking_quality_requirements_not_explicit" and
+               finding.path == "code_quality.profiles.codescent_blocking.required_env_keys"
+           end)
   end
 
   test "does not let project config override a locked RunSpec after start" do

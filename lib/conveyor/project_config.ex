@@ -26,6 +26,9 @@ defmodule Conveyor.ProjectConfig do
     artifact_path
     consumers
   )
+  @quality_requirement_fields ~w(required_tools required_env_keys)
+  @quality_list_fields ~w(checks required_tools required_env_keys consumers)
+  @quality_modes ~w(advisory blocking)
   @secret_fragments ~w(secret token password credential private_key api_key)
 
   defstruct [
@@ -314,8 +317,7 @@ defmodule Conveyor.ProjectConfig do
     {policy_profiles, policy_findings} =
       profile_group(raw_config, ["policy", "profiles"], "policy.profiles")
 
-    {code_quality_profiles, quality_findings} =
-      profile_group(raw_config, ["code_quality", "profiles"], "code_quality.profiles")
+    {code_quality_profiles, quality_findings} = code_quality_profile_group(raw_config)
 
     defaults = %{
       "toolchain_profile" => Map.get(raw_config, "default_toolchain_profile"),
@@ -528,6 +530,148 @@ defmodule Conveyor.ProjectConfig do
         {%{}, [finding("invalid_profile_group", "error", "#{label} must be a table", label)]}
     end
   end
+
+  defp code_quality_profile_group(raw_config) do
+    case get_path(raw_config, ["code_quality", "profiles"]) do
+      profiles when is_map(profiles) ->
+        normalized_profiles = normalize_map(profiles)
+
+        findings =
+          normalized_profiles
+          |> Enum.sort_by(fn {id, _profile} -> id end)
+          |> Enum.flat_map(fn {id, profile} -> validate_code_quality_profile(id, profile) end)
+
+        profiles =
+          Map.new(normalized_profiles, fn {id, profile} ->
+            {id, normalize_code_quality_profile(profile)}
+          end)
+
+        {profiles, findings}
+
+      nil ->
+        {%{},
+         [
+           finding(
+             "missing_profile_group",
+             "error",
+             "missing code_quality.profiles",
+             "code_quality.profiles"
+           )
+         ]}
+
+      _other ->
+        {%{},
+         [
+           finding(
+             "invalid_profile_group",
+             "error",
+             "code_quality.profiles must be a table",
+             "code_quality.profiles"
+           )
+         ]}
+    end
+  end
+
+  defp validate_code_quality_profile(id, profile) when is_map(profile) do
+    blocking? = code_quality_blocking?(profile)
+
+    findings =
+      []
+      |> require_string(
+        Map.get(profile, "adapter"),
+        "code_quality.profiles.#{id}.adapter",
+        "adapter is required"
+      )
+      |> require_quality_mode(id, Map.get(profile, "mode"))
+      |> require_quality_list_fields(id, profile)
+
+    if blocking? do
+      require_explicit_blocking_quality_requirements(findings, id, profile)
+    else
+      findings
+    end
+  end
+
+  defp validate_code_quality_profile(id, _profile) do
+    [
+      finding(
+        "invalid_code_quality_profile",
+        "error",
+        "code quality profile #{id} must be a table",
+        "code_quality.profiles.#{id}"
+      )
+    ]
+  end
+
+  defp normalize_code_quality_profile(profile) when is_map(profile) do
+    blocking? = code_quality_blocking?(profile)
+
+    profile
+    |> Map.put_new("mode", if(blocking?, do: "blocking", else: "advisory"))
+    |> Map.put("blocking", blocking?)
+    |> Map.put_new("checks", [])
+    |> Map.put_new("required_tools", [])
+    |> Map.put_new("required_env_keys", [])
+    |> Map.put_new("consumers", ["context_pack", "gate"])
+  end
+
+  defp normalize_code_quality_profile(profile), do: profile
+
+  defp require_quality_mode(findings, _id, nil), do: findings
+
+  defp require_quality_mode(findings, _id, mode) when mode in @quality_modes, do: findings
+
+  defp require_quality_mode(findings, id, mode) do
+    [
+      finding(
+        "invalid_quality_mode",
+        "error",
+        "code quality profile #{id} mode must be advisory or blocking",
+        "code_quality.profiles.#{id}.mode",
+        nil,
+        %{actual: mode}
+      )
+      | findings
+    ]
+  end
+
+  defp require_quality_list_fields(findings, id, profile) do
+    Enum.reduce(@quality_list_fields, findings, fn field, findings ->
+      if Map.has_key?(profile, field) do
+        require_string_list(
+          findings,
+          Map.get(profile, field),
+          "code_quality.profiles.#{id}.#{field}"
+        )
+      else
+        findings
+      end
+    end)
+  end
+
+  defp require_explicit_blocking_quality_requirements(findings, id, profile) do
+    Enum.reduce(@quality_requirement_fields, findings, fn field, findings ->
+      if Map.has_key?(profile, field) do
+        findings
+      else
+        [
+          finding(
+            "blocking_quality_requirements_not_explicit",
+            "error",
+            "blocking code quality profile #{id} must explicitly declare #{field}",
+            "code_quality.profiles.#{id}.#{field}"
+          )
+          | findings
+        ]
+      end
+    end)
+  end
+
+  defp code_quality_blocking?(profile) when is_map(profile) do
+    truthy?(Map.get(profile, "blocking")) or Map.get(profile, "mode") == "blocking"
+  end
+
+  defp code_quality_blocking?(_profile), do: false
 
   defp require_version(findings, 1), do: findings
 

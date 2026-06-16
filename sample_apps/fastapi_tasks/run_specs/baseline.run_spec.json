@@ -14,6 +14,26 @@
     "production_secrets_required": false,
     "network_egress_required": false
   },
+  "quality": {
+    "default_profile": "sample_noop",
+    "local_advisory_profile": "sample_local_python",
+    "context_pack_ref": {
+      "schema_version": "conveyor.context_pack.quality_ref@1",
+      "profile_id": "sample_noop",
+      "adapter": "noop",
+      "mode": "advisory",
+      "required": false
+    },
+    "gate_ref": {
+      "schema_version": "conveyor.gate.quality_ref@1",
+      "profile_id": "sample_noop",
+      "adapter": "noop",
+      "mode": "advisory",
+      "required": false,
+      "advisory": true
+    },
+    "blocking_profiles_require_explicit_requirements": true
+  },
   "commands": {
     "install": "python -m pip install -e '.[test]'",
     "baseline": "./scripts/run_baseline.sh"
