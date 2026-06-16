@@ -31,6 +31,7 @@ class RegistryEntry:
 
 
 VMR_REF = "conveyor-quality-ci-evals-vmr.13"
+VMR_EVIDENCE_REF = "conveyor-quality-ci-evals-vmr.6"
 JSON_DECODER = json.JSONDecoder()
 
 
@@ -51,9 +52,15 @@ def load_registry() -> tuple[list[RegistryEntry], str]:
 
 def finding(entry: RegistryEntry | None, check: str, status: str, **extra: Any) -> dict[str, Any]:
     body: dict[str, Any] = {
+        "report_schema": "conveyor.schema_validation_finding@1",
+        "category": "schema_validation",
         "check": check,
         "status": status,
         "vmr_ref": VMR_REF,
+        "shared_with": [
+            VMR_EVIDENCE_REF,
+            VMR_REF,
+        ],
     }
     if entry is not None:
         body.update(
@@ -121,6 +128,15 @@ def main() -> int:
             schema = load_json(schema_path)
             Draft202012Validator.check_schema(schema)
             findings.append(finding(entry, "schema_load", "pass"))
+            schema_version_required = "schema_version" in schema.get("required", [])
+            findings.append(
+                finding(
+                    entry,
+                    "schema_version_required",
+                    "pass" if schema_version_required else "fail",
+                    failure_category=None if schema_version_required else "missing_schema_version_requirement",
+                )
+            )
         except (OSError, ValueError, SchemaError) as exc:
             findings.append(finding(entry, "schema_load", "fail", error=str(exc)))
             continue
@@ -137,6 +153,11 @@ def main() -> int:
 
             version_error = explicit_version_error(registry, payload.get("schema_version", ""))
             errors = [version_error["message"]] if version_error else validate_payload(schema, payload)
+            failure_category = None
+            if version_error:
+                failure_category = version_error["code"]
+            elif errors:
+                failure_category = "schema_validation_failed"
             actual_status = "fail" if errors else "pass"
             status = "pass" if actual_status == expected_status else "fail"
             findings.append(
@@ -147,6 +168,7 @@ def main() -> int:
                     example=str(path.relative_to(ROOT)),
                     expected=expected_status,
                     actual=actual_status,
+                    failure_category=failure_category,
                     errors=errors,
                 )
             )
@@ -181,7 +203,12 @@ def main() -> int:
     failed = [item for item in findings if item["status"] != "pass"]
     result = {
         "schema_registry": str(SCHEMA_DIR.relative_to(ROOT)),
+        "report_schema": "conveyor.schema_validation_report@1",
         "vmr_ref": VMR_REF,
+        "shared_with": [
+            VMR_EVIDENCE_REF,
+            VMR_REF,
+        ],
         "checked_versions": [entry.version for entry in registry],
         "summary": {
             "passed": len(findings) - len(failed),

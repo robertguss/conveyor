@@ -15,18 +15,27 @@ vendor/
 .venv/
 venv/
 __pycache__/
+/deps/
 
 # Build outputs
 dist/
 build/
+/_build/
+sample_apps/fastapi_tasks/artifacts/
 *.exe
 *.dll
 *.so
 *.dylib
+erl_crash.dump
+.elixir_ls/
 
 # Logs
 *.log
 logs/
+tmp/
+
+# Local agent/session state
+.ntm/
 
 # Environment
 .env

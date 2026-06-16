@@ -50,6 +50,27 @@
       "schema_file": "run_bundle.v1.schema.json",
       "valid_example": "run_bundle.json",
       "invalid_example": "run_bundle.missing-required.json"
+    },
+    {
+      "artifact": "manifest",
+      "version": "manifest@1",
+      "schema_file": "manifest.v1.schema.json",
+      "valid_example": "manifest.json",
+      "invalid_example": "manifest.missing-required.json"
+    },
+    {
+      "artifact": "provenance",
+      "version": "provenance@1",
+      "schema_file": "provenance.v1.schema.json",
+      "valid_example": "provenance.json",
+      "invalid_example": "provenance.missing-required.json"
+    },
+    {
+      "artifact": "key_result",
+      "version": "key_result@1",
+      "schema_file": "key_result.v1.schema.json",
+      "valid_example": "key_result.json",
+      "invalid_example": "key_result.missing-required.json"
     }
   ]
 }

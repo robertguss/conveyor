@@ -1,0 +1,126 @@
+{
+  "schema": "conveyor.phase_hooks@1",
+  "matrix_ref": "conveyor-quality-ci-evals-vmr.13",
+  "issue_id": "conveyor-observability-swarm-readiness-ohk.10",
+  "non_implementation_rules": [
+    "merge queue",
+    "task claims",
+    "memory",
+    "economic governor",
+    "workspace pool",
+    "multi-repo orchestration",
+    "autonomous retry"
+  ],
+  "future_systems": [
+    {
+      "id": "decomposition",
+      "name": "Decomposition",
+      "future_phase": "Phase 2",
+      "seeded_fields": [
+        "human_plan.id",
+        "requirement.id",
+        "acceptance_criteria.id",
+        "slice.id",
+        "contract_lock.digest",
+        "agent_brief.digest",
+        "station_plan.dependencies"
+      ],
+      "later_hook": "Split larger plans into ordered, traceable Slices without changing the Phase 1 plan-audit contract.",
+      "phase1_boundary": "Phase 1 audits and runs the Slice it is given; it does not implement an autonomous decomposition queue."
+    },
+    {
+      "id": "parallel_fleet_merge_queue",
+      "name": "Parallel Fleet And Merge Queue",
+      "future_phase": "Phase 3",
+      "seeded_fields": [
+        "run_attempt.id",
+        "workspace.root",
+        "toolchain_profile.digest",
+        "gate.decision",
+        "review.decision",
+        "run_bundle.root_digest",
+        "pr_body.artifact"
+      ],
+      "later_hook": "Compare parallel runs, lease workspaces, and expose human-visible merge candidates.",
+      "phase1_boundary": "Phase 1 does not implement merge queue, workspace pool, or multi-repo orchestration."
+    },
+    {
+      "id": "verification_pyramid",
+      "name": "Verification Pyramid",
+      "future_phase": "Phase 2",
+      "seeded_fields": [
+        "verification_matrix.ref",
+        "test_command.transcript",
+        "junit.path",
+        "schema_validation.report",
+        "gate_canary.outcome",
+        "failure.category",
+        "next_action"
+      ],
+      "later_hook": "Group evidence into unit, integration, e2e, canary, replay, and policy layers.",
+      "phase1_boundary": "Phase 1 records and gates evidence; it does not replace project-specific test ownership."
+    },
+    {
+      "id": "autonomy_self_healing",
+      "name": "Autonomy And Self-Healing",
+      "future_phase": "Phase 4",
+      "seeded_fields": [
+        "autonomy.level",
+        "run_budget.stop",
+        "policy_incident.id",
+        "review.findings",
+        "gate.findings",
+        "rejected_approach.notes",
+        "retry_eligibility.finding"
+      ],
+      "later_hook": "Reason about promotion, retry, and self-healing policies from auditable evidence.",
+      "phase1_boundary": "Phase 1 does not implement autonomous retry."
+    },
+    {
+      "id": "economic_governor",
+      "name": "Economic Governor",
+      "future_phase": "Phase 5",
+      "seeded_fields": [
+        "station_run.duration_ms",
+        "token_usage.summary",
+        "tool_usage.summary",
+        "budget.limit",
+        "non_progress_stop.finding",
+        "artifact_storage.bytes"
+      ],
+      "later_hook": "Support cost accounting, budget allocation, and throughput tradeoff decisions.",
+      "phase1_boundary": "Phase 1 does not implement economic governor."
+    },
+    {
+      "id": "learning_loop",
+      "name": "Learning Loop",
+      "future_phase": "Phase 4",
+      "seeded_fields": [
+        "context_pack.digest",
+        "dossier.digest",
+        "reviewer_rubric.version",
+        "policy_finding.category",
+        "gate_finding.category",
+        "rejected_alternatives"
+      ],
+      "later_hook": "Propose reusable lessons while keeping provenance and redaction requirements attached.",
+      "phase1_boundary": "Phase 1 does not implement memory."
+    },
+    {
+      "id": "throughput_upgrades",
+      "name": "Throughput Upgrades",
+      "future_phase": "Phase 6",
+      "seeded_fields": [
+        "station.key",
+        "station_run.duration_ms",
+        "queue_wait.duration_ms",
+        "artifact_digest.count",
+        "policy_decision.id",
+        "canary_freshness.result",
+        "report_projection.duration_ms"
+      ],
+      "later_hook": "Analyze bottlenecks, station parallelism, and operator-facing throughput tuning.",
+      "phase1_boundary": "Phase 1 does not implement fleet scheduling or multi-repo orchestration."
+    }
+  ]
+}

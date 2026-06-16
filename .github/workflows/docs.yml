@@ -1,0 +1,23 @@
+name: Docs Contract
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+jobs:
+  phase0-docs:
+    name: Phase 0/1 docs contract
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Validate Phase 0/1 docs
+        run: python scripts/verify_phase0_docs.py

@@ -8,12 +8,25 @@ OUT_DIR="${BASELINE_OUT_DIR:-${ROOT_DIR}/artifacts/${RUN_ID}}"
 mkdir -p "${OUT_DIR}"
 cd "${ROOT_DIR}"
 
+if command -v uv >/dev/null 2>&1; then
+  PYTEST_CMD=(uv run --extra test python -m pytest)
+else
+  PYTHON_BIN="${PYTHON_BIN:-python3}"
+  PYTEST_CMD=("${PYTHON_BIN}" -m pytest)
+fi
+
 set +e
-python -m pytest tests --junitxml "${OUT_DIR}/pytest-junit.xml" 2>&1 | tee "${OUT_DIR}/pytest.log"
+"${PYTEST_CMD[@]}" tests/baseline_regression --junitxml "${OUT_DIR}/pytest-junit.xml" 2>&1 | tee "${OUT_DIR}/pytest.log"
 PYTEST_STATUS="${PIPESTATUS[0]}"
 set -e
 
-python - "${OUT_DIR}" "${PYTEST_STATUS}" <<'PY'
+if command -v python3 >/dev/null 2>&1; then
+  SUMMARY_PYTHON=python3
+else
+  SUMMARY_PYTHON="${PYTEST_CMD[0]}"
+fi
+
+"${SUMMARY_PYTHON}" - "${OUT_DIR}" "${PYTEST_STATUS}" <<'PY'
 import json
 import sys
 import xml.etree.ElementTree as ET
@@ -28,6 +41,9 @@ summary = {
     "schema_version": "baseline_summary@1",
     "generated_at": datetime.now(timezone.utc).isoformat(),
     "sample": "fastapi_tasks",
+    "suite": "baseline_regression",
+    "blocks_implementation": True,
+    "acceptance_locked_suite": "separate",
     "storage": "in_memory",
     "production_secrets_required": False,
     "network_egress_required": False,
@@ -54,4 +70,3 @@ print(f"baseline summary: {summary_path}")
 PY
 
 exit "${PYTEST_STATUS}"
-

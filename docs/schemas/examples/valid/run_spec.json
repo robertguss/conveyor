@@ -4,6 +4,15 @@
   "plan_id": "plan-phase1-demo",
   "created_at": "2026-06-16T19:33:00Z",
   "conductor_version": "conveyor-phase0",
+  "artifact_schema_versions": {
+    "evidence": "evidence@1",
+    "review": "review@1",
+    "gate": "gate@1",
+    "run_bundle": "run_bundle@1",
+    "manifest": "manifest@1",
+    "provenance": "provenance@1",
+    "key_result": "key_result@1"
+  },
   "stations": [
     "readiness",
     "baseline",

@@ -1,60 +1,166 @@
 # Conveyor Vision
 
+## Shared Contract
+
+Conveyor is a deterministic conductor plus stochastic agents.
+
+Phase 1 target autonomy level is L1.
+
+Phase 1 produces PR-quality evidence but does not auto-merge or deploy.
+
+The factory-kernel primitives must not be cut.
+
+Phase 1 L1 target: assisted implementation that produces PR-quality evidence
+but does not auto-merge or deploy.
+
+The factory-kernel primitives that must not be cut are listed in this document.
+
+Conveyor verification matrix item: conveyor-quality-ci-evals-vmr.13.
+
 ## Purpose
 
-Conveyor is a deterministic conductor plus stochastic agents for agentic coding work. Its job is to turn a task into a reproducible run: select the policy, prepare the workspace, route prompts to coding agents, collect evidence, review the evidence, and stop at an auditable gate.
+Conveyor turns agentic coding work into auditable, repeatable factory runs. It
+does not try to make an agent trustworthy by assertion. It wraps agents in a
+deterministic control plane that plans work, locks contracts, executes bounded
+stations, records evidence, checks policy, and produces a human-reviewable run
+bundle.
 
-Conveyor is not a general issue tracker, LLM framework, deployment system, or autonomous production operator. It coordinates those surrounding systems through explicit contracts and leaves durable evidence that a human can inspect.
+The product exists so a maintainer can ask for a small, well-scoped code change
+and receive:
+
+- A traceable plan and Slice contract.
+- A bounded agent attempt under an explicit autonomy level.
+- Independent conductor verification, not just agent self-report.
+- A dossier and PR body that explain what changed, what passed, what failed,
+  and what remains risky.
+- A deterministic gate result that can block unsafe or unproven output.
 
 ## Product Contract
 
-Phase 1 produces PR-quality evidence but does not auto-merge or deploy. The Phase 1 L1 target is supervised execution: Conveyor may prepare plans, run bounded tools, gather evidence, and propose a pull request package, but a human remains responsible for merge and deployment decisions.
+Phase 0 builds the foundation: the product contract, project configuration,
+control-plane scaffold, doctor checks, schema vocabulary, and policy baseline.
 
-The product is the run record, not just the code change. A successful run produces enough evidence for another operator to replay the command path, inspect the trust decisions, and understand why the gate stopped or passed.
+Phase 1 proves the tracer bullet: one sterile FastAPI task app, one locked human
+plan, one Slice, one agent implementation attempt, one reviewer pass, one gate,
+and one projected run bundle.
+
+The Phase 1 output is PR-quality evidence. A human remains responsible for
+reviewing, merging, deploying, and handling production consequences.
 
 ## Non-Goals
 
-Conveyor does not replace GitHub, Beads, Agent Mail, CI, code review, or release automation. It does not own source-of-truth issue state. It does not keep secret credentials for arbitrary agents. It does not auto-merge, auto-deploy, or silently bypass policy in Phase 1.
+Phase 0/1 does not provide autonomous production deployment.
 
-Conveyor also does not hide stochastic behavior behind claims of determinism. Agents may be stochastic; Conveyor is deterministic in orchestration, artifact naming, policy checks, evidence validation, and gate decisions.
+Phase 0/1 does not auto-merge pull requests.
+
+Phase 0/1 does not replace human product judgment, security review, or incident
+ownership.
+
+Phase 0/1 does not depend on live provider credentials for default CI, default
+demo, or the hermetic tracer path.
+
+Phase 0/1 does not support arbitrary unbounded agent command execution.
+
+Phase 0/1 does not promise broad language/framework coverage. The tracer uses a
+sterile FastAPI sample app and the control plane is planned as a Phoenix, Ash,
+Oban, and Postgres application.
 
 ## Phase 0 and Phase 1 Cutline
 
-Phase 0 establishes the product contract, schemas, control-plane scaffold, local policy, and fixtures. Phase 1 proves the tracer path on hermetic tasks with deterministic logs, replayable evidence, and no live production authority.
+Phase 0 establishes the contracts and minimum enforcement required for the
+factory. Phase 1 proves those contracts through one L1 tracer run. Both phases
+preserve the no-auto-merge and no-deploy boundary, and both keep the
+factory-kernel primitives in scope.
 
-The cutline favors a small factory kernel over broad platform surface area. Anything not required to demonstrate the tracer path, evidence package, or gate should be deferred and named explicitly.
+## Phase 0 Cutline
+
+Phase 0 must establish the words, contracts, and minimum enforcement points that
+future implementation depends on. It includes:
+
+- Vision, autonomy, safety, task, evidence, and architecture contracts.
+- A project configuration model and generated AGENTS.md policy.
+- A Phoenix/Ash/Oban/Postgres control-plane scaffold.
+- Runtime prerequisite doctor checks.
+- Baseline CI and verification matrix mapping.
+
+Phase 0 may document deferred resources, but it must not create unused tables or
+fake compatibility shims for future phases.
+
+## Phase 1 Cutline
+
+Phase 1 is a tracer bullet, not a platform launch. It must demonstrate one
+end-to-end run with deterministic defaults:
+
+- Human-authored plan and AgentBrief.
+- Locked TestPack and acceptance calibration.
+- Clean base workspace and clean gate workspace.
+- Deterministic fake runner by default, with live adapters behind explicit
+  configuration.
+- Evidence, review, gate, canary freshness, and report projection.
+
+The tracer can produce a patch and PR-ready dossier, but it stops before merge
+or deploy.
+
+## Evidence Requirements
+
+Every successful run must produce machine evidence and human evidence. Machine
+evidence must include stable identifiers, digests, command records, acceptance
+coverage, policy decisions, review and gate results, and known risks. Human
+evidence must include a dossier and PR body that are useful without opening a
+LiveView.
+
+Agent claims are inputs, not evidence. Evidence is created by the conductor from
+locked contracts, clean workspaces, policy-mediated commands, and deterministic
+checks.
+
+## Trust Boundaries
+
+The repository under change, agent output, tool output, generated patches, and
+reviewer output are untrusted inputs. The conductor, locked contracts, policy
+engine, artifact digests, gate composition, and human decisions form the trusted
+control boundary.
+
+No component may treat mutable workspace state as proof. Proof is recorded as
+content-addressed artifacts and structured findings.
+
+## Explicit Deferrals
+
+The following are intentionally outside Phase 0/1:
+
+- Autonomous merge, release, deployment, rollback, or production operations.
+- Long-running multi-repo swarm scheduling.
+- Hosted SaaS tenancy, billing, or organization administration.
+- Broad adapter parity across every coding agent.
+- Full object-storage backend beyond the local artifact projection seam.
+- Advanced LiveView operator controls beyond the minimal planned surface.
 
 ## Factory-Kernel Primitives
 
 The factory-kernel primitives that must not be cut are:
 
-- `RunSpec`: immutable description of the run inputs, environment, policy, and versions.
-- `TaskSpec`: normalized task, acceptance criteria, constraints, and linked Beads issue.
-- `StationPlan`: ordered station graph for readiness, scout, prompt, implement, evidence, review, gate, canary freshness, and report.
-- `ToolInvocation`: command, sandbox, network, credential, and timeout envelope.
-- `EvidenceRecord`: transcript, artifacts, findings, hashes, and replay pointers.
-- `ReviewRecord`: reviewer dossier, checks performed, risks, and open questions.
-- `GateDecision`: deterministic pass, fail, or blocked result with policy reasons.
-- `RunBundle`: content-addressed package that ties every station artifact together.
+- PlanAudit with structured findings and readiness status.
+- Requirement, acceptance, test, and Slice traceability.
+- HumanDecision and HumanApproval records for scope and contract changes.
+- AgentBrief as the locked implementation contract.
+- ContractLock over plan, brief, tests, policy, AGENTS.md, and protected paths.
+- Immutable RunSpec and versioned StationPlan.
+- StationRun and StationEffect idempotency.
+- Append-only LedgerEvent writer and transactional outbox.
+- ToolExecutor and Policy.Engine for command execution.
+- AgentRunner event envelope and capability-derived autonomy ceiling.
+- PatchSet capture from a fresh base.
+- Content-addressed artifacts and RunBundle root digest.
+- EvidenceRecorder, RunCheck, Review, Gate, canary health, and replay hooks.
 
-These primitives are the minimum shape needed for trust. UI, scheduling, adapters, dashboards, and deployment integrations are secondary until the primitives are stable.
+## Done Criteria
 
-## Evidence Requirements
-
-Every run must capture the commands that were attempted, their exit status, timestamped station boundaries, environment summary, relevant policy, artifact paths, structured findings, and final gate decision. Evidence must be deterministic enough for local replay without requiring live credentials or network access unless the `RunSpec` explicitly permits them.
-
-Evidence must distinguish agent claims from verified facts. Conveyor records both, but gates only trust facts backed by artifacts, transcripts, schema validation, or deterministic checks.
-
-## Trust Boundaries
-
-Conveyor treats agents, generated code, shell commands, network access, credentials, and mutable workspaces as separate trust domains. Crossing a boundary requires an explicit policy decision and evidence record.
-
-Human authority remains outside the automated boundary in Phase 1. A human may approve a merge or deployment after reading the evidence, but Conveyor must not take that action itself.
-
-## Explicit Deferrals
-
-Deferred work includes multi-tenant permissions, production deploy orchestration, autonomous merge, live credential brokering, generalized issue tracking, cross-repo planning, and long-running agent marketplace features. These deferrals can become Beads later, but they are not required for the Phase 1 tracer.
+The Phase 0/1 contract is done when the root contract docs exist, the docs
+validator passes, the no-auto-merge and L1-target statements are enforced, and
+the verification matrix can cite this contract as coverage for
+conveyor-phase0-foundations-hsh.1.
 
 ## Verification Mapping
 
-`conveyor-quality-ci-evals-vmr.13` is the verification matrix owner for this contract. The docs contract check is `python3 scripts/check_docs_contract.py`, and CI wires it through `.github/workflows/docs-contract.yml`. The check emits structured findings for missing files, missing sections, missing invariant statements, and the `conveyor-quality-ci-evals-vmr.13` mapping reference.
+This document is enforced by the Phase 0/1 docs contract check and mapped to
+conveyor-quality-ci-evals-vmr.13. Missing sections or invariant phrases must be
+reported as structured findings.

@@ -11,6 +11,7 @@
     "plan_id",
     "created_at",
     "conductor_version",
+    "artifact_schema_versions",
     "stations"
   ],
   "properties": {
@@ -32,6 +33,18 @@
     "conductor_version": {
       "type": "string",
       "minLength": 1
+    },
+    "artifact_schema_versions": {
+      "type": "object",
+      "description": "Public artifact schema versions recorded in this immutable run input.",
+      "minProperties": 1,
+      "propertyNames": {
+        "pattern": "^[a-z][a-z0-9_.]*$"
+      },
+      "additionalProperties": {
+        "type": "string",
+        "pattern": "^[a-z][a-z0-9_.]*@[0-9]+$"
+      }
     },
     "stations": {
       "type": "array",

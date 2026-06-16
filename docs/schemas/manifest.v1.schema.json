@@ -1,0 +1,79 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://conveyor.local/schemas/manifest@1",
+  "title": "Artifact Manifest",
+  "description": "Digest-checked public artifact manifest for one Conveyor run.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "manifest_id",
+    "run_id",
+    "created_at",
+    "root_digest",
+    "artifacts"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "manifest@1"
+    },
+    "manifest_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "run_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "root_digest": {
+      "type": "string",
+      "pattern": "^sha256:[a-f0-9]{64}$"
+    },
+    "artifacts": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "schema_version",
+          "artifact_role",
+          "path",
+          "sha256"
+        ],
+        "properties": {
+          "schema_version": {
+            "type": "string",
+            "minLength": 1
+          },
+          "artifact_role": {
+            "enum": [
+              "evidence",
+              "review",
+              "gate",
+              "run_bundle",
+              "provenance",
+              "key_result",
+              "dossier",
+              "pr_body",
+              "command_log",
+              "diff"
+            ]
+          },
+          "path": {
+            "type": "string",
+            "minLength": 1
+          },
+          "sha256": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          }
+        }
+      }
+    }
+  }
+}

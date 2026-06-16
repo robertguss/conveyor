@@ -1,0 +1,22 @@
+{
+  "schema_version": "provenance@1",
+  "provenance_id": "provenance-001",
+  "run_id": "run-20260616-0001",
+  "generated_at": "2026-06-16T19:34:00Z",
+  "builder": {
+    "name": "conveyor",
+    "version": "conveyor-phase0"
+  },
+  "materials": [
+    {
+      "uri": "git+file://sample_apps/fastapi_tasks@abc123",
+      "sha256": "2222222222222222222222222222222222222222222222222222222222222222"
+    }
+  ],
+  "subjects": [
+    {
+      "path": "runs/run-20260616-0001/manifest.json",
+      "sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+    }
+  ]
+}

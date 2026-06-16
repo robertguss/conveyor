@@ -1,71 +1,226 @@
 # Conveyor Task Schema
 
+## Shared Contract
+
+Conveyor is a deterministic conductor plus stochastic agents.
+
+Phase 1 target autonomy level is L1.
+
+Phase 1 produces PR-quality evidence but does not auto-merge or deploy.
+
+The factory-kernel primitives must not be cut.
+
+Phase 1 L1 target: assisted implementation that produces PR-quality evidence
+but does not auto-merge or deploy.
+
+The factory-kernel primitives that must not be cut are listed in this document.
+
+Conveyor verification matrix item: conveyor-quality-ci-evals-vmr.13.
+
 ## Purpose
 
-This document defines the Phase 0/1 task contract. Conveyor is a deterministic conductor plus stochastic agents; this schema is how the conductor turns an issue and operator intent into bounded work.
+This document defines the Phase 0/1 task contract for plans, requirements,
+Slices, AgentBriefs, RunSpecs, StationPlans, readiness, and structured findings.
 
-Phase 1 produces PR-quality evidence but does not auto-merge or deploy. The Phase 1 L1 target means every task is scoped for supervised patch production and evidence capture.
+## Schema Contract
+
+This file defines the Phase 0/1 task contract in prose. The local schema
+registry will later provide machine-readable versions for public artifacts.
+Until then, implementations must preserve these field meanings and fail
+explicitly on unknown or unsupported schema versions.
 
 ## Schema Identity
 
-Schema name: `conveyor.task@1`
+The task contract uses versioned identities including conveyor.plan@1,
+agent_brief@1, run_spec@1, and station_plan@1. Unknown or unsupported identities
+must fail explicitly.
 
-A task is immutable once a run starts. If a human changes scope, Conveyor creates a new task version or a new run rather than mutating the original record.
+## Versioning
+
+Task contracts must carry a schema version. Phase 1 uses conveyor.plan@1,
+run_spec@1, station_plan@1, and agent_brief@1 vocabulary.
+
+Compatibility rules:
+
+- Unknown major versions fail explicitly.
+- Unsupported versions fail explicitly.
+- Future minor versions may be accepted only when documented semantic
+  compatibility exists.
+- Best-effort parsing is not allowed for handoff-ready work.
 
 ## Required Fields
 
-| Field | Type | Required Meaning |
-| --- | --- | --- |
-| `schema_version` | string | Must equal `conveyor.task@1`. |
-| `task_id` | string | Stable identifier for this normalized task. |
-| `issue_id` | string | Beads issue ID or explicit external issue reference. |
-| `title` | string | Human-readable task title. |
-| `intent` | string | What outcome the run is trying to produce. |
-| `autonomy_level` | string | Must be `L0` or `L1` for Phase 1. |
-| `cutline` | string | `TRACER_REQUIRED`, `TRUST_REQUIRED`, or another defined cutline. |
-| `inputs` | object | Files, Beads, messages, fixtures, and references used as input. |
-| `constraints` | array | Policy, scope, non-goals, and forbidden actions. |
-| `acceptance_criteria` | array | Verifiable completion checks. |
-| `station_plan_ref` | string | Reference to the `StationPlan` selected for the run. |
-| `evidence_plan` | array | Evidence that must exist before gate review. |
-| `human_approvals` | array | Required human approvals, including merge/deploy decisions. |
-| `deferrals` | array | Explicit out-of-scope work. |
+Required fields are the minimum fields needed to make a plan auditable, a Slice
+bounded, an AgentBrief executable, and a RunSpec replayable. Missing required
+fields block handoff-ready status.
 
 ## Validation Rules
 
-The task must name its Bead or equivalent issue, current autonomy level, expected evidence, and forbidden actions. Missing fields fail validation before tool execution.
+Validation must check schema version, required fields, traceability, explicit
+non-goals, acceptance coverage, required tests, policy refs, protected paths,
+and unsupported version behavior.
 
-The task must preserve non-goals. It must not expand a Phase 1 tracer into an issue tracker, LLM framework, deployment system, or autonomous merge flow.
+## Plan Fields
+
+A normalized plan must include:
+
+- schema_version.
+- project key and repository refs.
+- goal.
+- non_goals.
+- requirements with stable IDs, source refs, and status.
+- acceptance criteria with stable IDs.
+- required verification commands.
+- risk and safety notes.
+- architecture constraints and decisions.
+- explicit human decisions and approvals.
+- Slice list with traceability back to requirements and acceptance criteria.
+
+Prose-only plans may lint, but they cannot become handoff-ready.
+
+## Requirement Fields
+
+Each requirement must include:
+
+- Stable requirement ID.
+- Source section or artifact ref.
+- Status: active, deferred, out_of_scope, or superseded.
+- Acceptance criteria refs.
+- Required test refs where applicable.
+- Slice refs or a documented reason none apply.
+
+Open or orphaned requirements block handoff-ready status.
+
+## Slice Fields
+
+Each Slice must include:
+
+- Stable Slice ID.
+- Goal and current behavior.
+- Desired behavior.
+- Requirement refs.
+- Acceptance criteria refs.
+- Out-of-scope items.
+- Risk notes.
+- DiffPolicy refs.
+- Required tests.
+- Verification commands.
+- AgentBrief ref.
+
+A Slice is too vague if a reviewer cannot determine what files, behavior, and
+tests are in scope.
+
+## AgentBrief Fields
+
+An AgentBrief must include:
+
+- schema_version.
+- Slice ref.
+- Current behavior.
+- Desired behavior.
+- Key interfaces.
+- Acceptance criteria refs.
+- Required tests and command specs.
+- Out-of-scope items.
+- Risk and policy notes.
+- Allowed write paths.
+- Protected paths.
+- Autonomy level.
+- Contract digest.
+
+The Phase 1 target autonomy level is L1.
+
+## RunSpec Fields
+
+RunSpec is immutable once execution starts. It must include:
+
+- schema_version.
+- run_attempt_id.
+- project ref.
+- plan contract digest.
+- AgentBrief digest.
+- base commit or source identity.
+- policy profile refs.
+- toolchain profile refs.
+- TestPack refs.
+- StationPlan ref.
+- artifact schema versions.
+- autonomy level.
+- AGENTS.md digest where applicable.
+
+## StationPlan Fields
+
+StationPlan is a versioned capsule describing the deterministic conductor path.
+The Phase 1 linear plan includes readiness, baseline, acceptance calibration,
+context scout, prompt builder, implementation, evidence recording, review, gate,
+canary freshness, report projection, optional post-integration checks, and
+retrospective.
+
+Each station must define:
+
+- Name and version.
+- Inputs and required refs.
+- Idempotency key.
+- Policy profile.
+- Expected outputs.
+- Failure categories.
+- Artifact refs.
+
+## Human Decisions
+
+HumanDecision and HumanApproval records are required for:
+
+- Architecture choices that affect the contract.
+- Scope exclusions.
+- Contract changes.
+- Acceptance weakening.
+- Required test changes.
+- Policy weakening.
+- External integration expansion.
+
+## Readiness
+
+A task can become ready only when the plan, Slice, AgentBrief, acceptance
+criteria, tests, policy, DiffPolicy, and protected paths are complete enough for
+bounded execution.
+
+Readiness failures must be structured findings with stable categories and
+NextAction guidance.
 
 ## Task Lifecycle
 
-Task states are `draft`, `planned`, `running`, `blocked`, `failed`, and `completed`. The gate determines final run status, but it does not rewrite the task acceptance criteria after the run begins.
-
-If an agent discovers scope drift, Conveyor records a finding and either blocks the run or asks for a new task.
-
-## Factory-Kernel Primitives
-
-The factory-kernel primitives that must not be cut are `RunSpec`, `TaskSpec`, `StationPlan`, `ToolInvocation`, `EvidenceRecord`, `ReviewRecord`, `GateDecision`, and `RunBundle`. `conveyor.task@1` is the external task-facing part of `TaskSpec`.
+The task lifecycle moves from plan draft to audited plan, approved Slice, ready
+AgentBrief, locked RunSpec, station execution, evidence recording, review, gate,
+report projection, and human integration decision.
 
 ## Structured Findings
 
-Task validation findings use this shape:
+Task validation failures must emit structured findings naming the missing or
+invalid field, affected artifact, schema identity, severity, and NextAction.
+Findings must reference conveyor-quality-ci-evals-vmr.13 where they enforce this
+contract.
 
-```json
-{
-  "schema": "conveyor.finding@1",
-  "severity": "error",
-  "category": "task_schema",
-  "field": "acceptance_criteria",
-  "message": "missing required acceptance criteria",
-  "matrix_ref": "conveyor-quality-ci-evals-vmr.13"
-}
-```
+## Factory-Kernel Primitives
+
+Task readiness depends on factory-kernel primitives that must not be cut:
+PlanAudit, traceability, HumanDecision, HumanApproval, AgentBrief, ContractLock,
+RunSpec, StationPlan, locked TestPack, Policy.Engine, ToolExecutor, and
+LedgerEvent.
+
+## Verification Matrix Mapping
+
+This document maps to conveyor-quality-ci-evals-vmr.13. The docs validator must
+fail if required task sections, the L1 target, or the no-auto-merge and
+no-deploy rule are removed.
 
 ## Explicit Deferrals
 
-Deferred task features include cross-repo task decomposition, multi-tenant assignment, autonomous priority changes, and hidden compatibility shims for deprecated task versions.
+Deferred beyond this prose contract are the full local schema registry, broad
+artifact migration rules, hosted workflow templates, and autonomous merge or
+deploy task states.
 
 ## Verification Mapping
 
-`conveyor-quality-ci-evals-vmr.13` maps this schema to docs lint and later schema fixtures. For this Bead, `python3 scripts/check_docs_contract.py` verifies the required sections and invariant statements, and `.github/workflows/docs-contract.yml` runs the same check in CI.
+The Phase 0/1 docs contract check maps this document to
+conveyor-quality-ci-evals-vmr.13 and emits structured findings for missing
+sections or missing invariant phrases.

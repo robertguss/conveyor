@@ -1,0 +1,15 @@
+{
+  "schema_version": "key_result@1",
+  "result_id": "result-baseline-001",
+  "run_id": "run-20260616-0001",
+  "station_key": "baseline",
+  "result_type": "test",
+  "status": "pass",
+  "summary": "Baseline regression suite passed before implementation.",
+  "evidence_refs": [
+    "evidence-baseline-001"
+  ],
+  "acceptance_refs": [
+    "AC-001"
+  ]
+}

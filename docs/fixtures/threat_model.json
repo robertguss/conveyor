@@ -1,0 +1,249 @@
+{
+  "schema": "conveyor.threat_model_fixture@1",
+  "matrix_ref": "conveyor-quality-ci-evals-vmr.13",
+  "issue_id": "conveyor-safety-policy-sandbox-qsn.1",
+  "threat_classes": [
+    {
+      "id": "malicious_repo_content",
+      "title": "Malicious Repo Content",
+      "primary_defenses": [
+        "Normalize repository paths and command roots before execution.",
+        "Deny path escapes and hidden host roots.",
+        "Run repository code only through ToolExecutor policy."
+      ],
+      "residual_risks": [
+        "Valid-looking source or test code can still manipulate agents semantically."
+      ],
+      "phase1_coverage": [
+        {
+          "type": "policy_fixture",
+          "name": "malicious_repo_content_path_escape",
+          "station": "ToolExecutor",
+          "command": "python3 scripts/check_policy_fixture.py malicious_repo_content_path_escape",
+          "artifact": "fixtures/policy/malicious_repo_content_path_escape.json",
+          "expected_result": "blocking_finding"
+        }
+      ]
+    },
+    {
+      "id": "malicious_tool_output",
+      "title": "Malicious Tool Output",
+      "primary_defenses": [
+        "Label tool output as untrusted context.",
+        "Bind tool output to artifact digests.",
+        "Reject malformed output schemas."
+      ],
+      "residual_risks": [
+        "Schema-valid output can still contain misleading prose or partial evidence."
+      ],
+      "phase1_coverage": [
+        {
+          "type": "test",
+          "name": "malicious_tool_output_prompt_injection",
+          "station": "ContextPack",
+          "command": "mix test test/conveyor/policy/malicious_tool_output_test.exs",
+          "artifact": "fixtures/policy/malicious_tool_output_prompt_injection.json",
+          "expected_result": "untrusted_context_preserved"
+        }
+      ]
+    },
+    {
+      "id": "policy_evasion",
+      "title": "Policy Evasion",
+      "primary_defenses": [
+        "Normalize command specs before policy evaluation.",
+        "Apply explicit allowlists and denylists.",
+        "Require environment, network, and credential lease checks."
+      ],
+      "residual_risks": [
+        "A stale policy profile can omit a newly risky command form."
+      ],
+      "phase1_coverage": [
+        {
+          "type": "policy_fixture",
+          "name": "policy_evasion_shell_wrapper",
+          "station": "Policy.Engine",
+          "command": "python3 scripts/check_policy_fixture.py policy_evasion_shell_wrapper",
+          "artifact": "fixtures/policy/policy_evasion_shell_wrapper.json",
+          "expected_result": "denylisted_operation_blocked"
+        }
+      ]
+    },
+    {
+      "id": "test_weakening",
+      "title": "Test Weakening",
+      "primary_defenses": [
+        "Compare planned acceptance checks with executed test evidence.",
+        "Record gate findings for skipped, removed, or weakened tests.",
+        "Require explicit N/A rationale for omitted verification."
+      ],
+      "residual_risks": [
+        "Semantic weakening may require reviewer and acceptance calibration evidence."
+      ],
+      "phase1_coverage": [
+        {
+          "type": "canary",
+          "name": "test_weakening_removed_assertion",
+          "station": "Gate",
+          "command": "mix conveyor.contract_diff fixtures/canaries/test_weakening_removed_assertion",
+          "artifact": "fixtures/canaries/test_weakening_removed_assertion.json",
+          "expected_result": "gate_fail"
+        }
+      ]
+    },
+    {
+      "id": "secret_exposure",
+      "title": "Secret Exposure",
+      "primary_defenses": [
+        "Issue credentials only through CredentialLease records.",
+        "Redact before public projection.",
+        "Keep raw sensitive artifacts quarantined behind private paths."
+      ],
+      "residual_risks": [
+        "A tool can print secret-shaped data before redaction classifies it."
+      ],
+      "phase1_coverage": [
+        {
+          "type": "doctor_check",
+          "name": "secret_exposure_env_leak",
+          "station": "Doctor",
+          "command": "mix conveyor.doctor --check secret_exposure_env_leak",
+          "artifact": "fixtures/doctor/secret_exposure_env_leak.json",
+          "expected_result": "blocking_finding"
+        }
+      ]
+    },
+    {
+      "id": "supply_chain_drift",
+      "title": "Supply Chain Drift",
+      "primary_defenses": [
+        "Record ToolchainProfile data.",
+        "Compare dependency manifests across clean environments.",
+        "Fail the gate when runtime versions drift from the RunSpec."
+      ],
+      "residual_risks": [
+        "Compatible dependency ranges can still admit behavior changes."
+      ],
+      "phase1_coverage": [
+        {
+          "type": "test",
+          "name": "supply_chain_drift_unpinned_dependency",
+          "station": "RunCheck",
+          "command": "mix test test/conveyor/policy/supply_chain_drift_test.exs",
+          "artifact": "fixtures/policy/supply_chain_drift_unpinned_dependency.json",
+          "expected_result": "drift_reported"
+        }
+      ]
+    },
+    {
+      "id": "artifact_tampering",
+      "title": "Artifact Tampering",
+      "primary_defenses": [
+        "Store evidence under content-addressed digests.",
+        "Verify blob digests before report projection.",
+        "Compute a stable RunBundle root digest for replay."
+      ],
+      "residual_risks": [
+        "Deleted local artifact bytes cannot be reconstructed by Conveyor."
+      ],
+      "phase1_coverage": [
+        {
+          "type": "canary",
+          "name": "artifact_tampering_digest_mismatch",
+          "station": "ProjectArtifacts",
+          "command": "mix conveyor.replay fixtures/canaries/artifact_tampering_digest_mismatch",
+          "artifact": "fixtures/canaries/artifact_tampering_digest_mismatch.json",
+          "expected_result": "projection_fail"
+        }
+      ]
+    },
+    {
+      "id": "reviewer_rubber_stamps",
+      "title": "Reviewer Rubber Stamps",
+      "primary_defenses": [
+        "Separate reviewer profiles from implementer profiles.",
+        "Bind reviews to dossier digests and rubric versions.",
+        "Reject malformed or stale reviews before gate use."
+      ],
+      "residual_risks": [
+        "A review can be shallow but schema-valid unless checks require evidence."
+      ],
+      "phase1_coverage": [
+        {
+          "type": "test",
+          "name": "reviewer_rubber_stamp_empty_findings",
+          "station": "RunReviewer",
+          "command": "mix test test/conveyor/reviewer/rubber_stamp_test.exs",
+          "artifact": "fixtures/reviewer/reviewer_rubber_stamp_empty_findings.json",
+          "expected_result": "review_rejected"
+        }
+      ]
+    },
+    {
+      "id": "gate_false_negatives",
+      "title": "Gate False Negatives",
+      "primary_defenses": [
+        "Make gate decisions deterministic.",
+        "Fail closed on stale, missing, malformed, or inconsistent evidence.",
+        "Require blocking findings to include severity, category, artifact refs, and NextAction."
+      ],
+      "residual_risks": [
+        "The gate can only evaluate checks represented in current policy and schema."
+      ],
+      "phase1_coverage": [
+        {
+          "type": "canary",
+          "name": "gate_false_negative_missing_required_check",
+          "station": "Gate",
+          "command": "mix conveyor.demo --fixture gate_false_negative_missing_required_check",
+          "artifact": "fixtures/canaries/gate_false_negative_missing_required_check.json",
+          "expected_result": "gate_fail"
+        }
+      ]
+    },
+    {
+      "id": "internal_db_probing",
+      "title": "Internal DB Probing",
+      "primary_defenses": [
+        "Access internal state through scoped resources and append-only ledger APIs.",
+        "Project public reports only from approved artifact records.",
+        "Redact private run state before report projection."
+      ],
+      "residual_risks": [
+        "Authorization bugs can expose internal state before projection filters apply."
+      ],
+      "phase1_coverage": [
+        {
+          "type": "policy_fixture",
+          "name": "internal_db_probing_private_table",
+          "station": "ProjectArtifacts",
+          "command": "python3 scripts/check_policy_fixture.py internal_db_probing_private_table",
+          "artifact": "fixtures/policy/internal_db_probing_private_table.json",
+          "expected_result": "access_blocked"
+        }
+      ]
+    },
+    {
+      "id": "host_escape_and_overreach",
+      "title": "Host Escape And Overreach",
+      "primary_defenses": [
+        "Restrict Docker capabilities, filesystem mounts, host networking, and process privileges.",
+        "Reject commands outside declared roots or network policy before execution.",
+        "Make unsafe host prerequisites explicit in doctor checks."
+      ],
+      "residual_risks": [
+        "Kernel, container runtime, or host misconfiguration can exceed Conveyor control."
+      ],
+      "phase1_coverage": [
+        {
+          "type": "doctor_check",
+          "name": "host_escape_privileged_container",
+          "station": "Doctor",
+          "command": "mix conveyor.doctor --check host_escape_privileged_container",
+          "artifact": "fixtures/doctor/host_escape_privileged_container.json",
+          "expected_result": "blocking_finding"
+        }
+      ]
+    }
+  ]
+}

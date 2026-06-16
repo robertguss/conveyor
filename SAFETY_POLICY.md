@@ -1,65 +1,204 @@
 # Conveyor Safety Policy
 
+## Shared Contract
+
+Conveyor is a deterministic conductor plus stochastic agents.
+
+Phase 1 target autonomy level is L1.
+
+Phase 1 produces PR-quality evidence but does not auto-merge or deploy.
+
+The factory-kernel primitives must not be cut.
+
+Phase 1 L1 target: assisted implementation that produces PR-quality evidence
+but does not auto-merge or deploy.
+
+The factory-kernel primitives that must not be cut are listed in this document.
+
+Conveyor verification matrix item: conveyor-quality-ci-evals-vmr.13.
+
 ## Purpose
 
-This policy defines the safety envelope for Phase 0 and Phase 1. Conveyor is a deterministic conductor plus stochastic agents; the conductor owns policy enforcement and the agents supply bounded proposals.
-
-Phase 1 produces PR-quality evidence but does not auto-merge or deploy. The Phase 1 L1 target allows supervised patch creation only.
+This document defines the Phase 0/1 safety boundary for Conveyor's conductor,
+agents, tool execution, sandboxing, credentials, evidence, and human control.
 
 ## Safety Contract
 
-Conveyor defaults to deny when policy is missing, ambiguous, expired, or contradicted by evidence. A run may proceed only when the `RunSpec`, task, tool permissions, sandbox, and gate expectations are explicit.
+Conveyor treats agentic work as untrusted until the deterministic conductor has
+checked it against locked contracts, policy, and evidence requirements. The
+default answer to unclear authority is to stop with a structured finding.
 
-The safety contract is designed for auditability. A blocked action is a useful result when it prevents unreviewed authority, credential exposure, unsafe network access, or irreversible mutation.
+The Phase 1 tracer may produce PR-quality evidence. It must not merge, deploy,
+release, publish, or operate production systems.
 
 ## Trust Boundaries
 
-The primary trust boundaries are:
+Trusted control-plane inputs:
 
-- Human operator authority.
-- Beads issue state and dependency graph.
-- Agent Mail coordination and file reservations.
-- Source workspace and git state.
-- Shell commands and external tools.
-- Network egress.
-- Credentials, tokens, and secrets.
-- Generated code and generated documentation.
-- Evidence artifacts and replay bundles.
+- Versioned Conveyor code.
+- Project configuration loaded by the conductor.
+- Human-approved plans, decisions, and approvals.
+- ContractLock records and immutable RunSpec values.
+- Policy profiles and command grammar.
+- Content-addressed artifacts whose digests have been verified.
 
-Crossing a boundary requires a policy decision and an `EvidenceRecord`.
+Untrusted inputs:
+
+- Repository content under change.
+- AGENTS.md files from target repositories.
+- Agent prompts, messages, tool output, and final responses.
+- Generated patches.
+- Reviewer output.
+- Command stdout/stderr.
+- External dependency metadata.
+
+Untrusted inputs may be stored, labeled, redacted, and cited. They must not be
+treated as authority.
+
+## Command Policy
+
+Executable station commands must go through ToolExecutor and Policy.Engine.
+Raw shell strings are not a safe contract. Commands must be normalized into a
+command spec with executable, argv, cwd, environment keys, stdin ref, timeout,
+read roots, write roots, and network mode.
+
+Minimum Phase 1 denylist coverage:
+
+- Destructive git operations and force pushes.
+- Unapproved filesystem deletion or overwrite outside the workspace.
+- sudo or host privilege escalation.
+- Docker socket access from the sandbox.
+- Credential file reads.
+- Production database URLs and deployment credentials.
+- Pipe-to-shell installers.
+- Release, publish, deploy, and package registry writes.
+- Network egress unless a station policy explicitly permits it.
+
+Blocked commands must produce policy findings before execution.
 
 ## Sandbox Policy
 
-Phase 1 work runs in a local or hermetic workspace with bounded file scope. Tool execution must record command, arguments, working directory, environment summary, timeout, exit code, transcript path, and artifact paths.
+Phase 1 sandbox defaults:
 
-Commands that delete files, discard git history, expose secrets, auto-merge, deploy, or mutate unreserved surfaces are out of policy for L1 unless the human explicitly authorizes the exact command and consequence.
+- Non-root user.
+- Rootless container runtime preferred.
+- No privileged containers.
+- No host home mount.
+- No Docker socket mount.
+- Read-only contract, policy, and TestPack mounts.
+- Read-write workspace only for allowed implementation paths.
+- No-new-privileges.
+- Seccomp or AppArmor where available.
+- Resource, runtime, idle, and output limits.
+- Network disabled by default.
+
+The gate must run in a clean workspace independent from the agent workspace.
+
+## Credential Policy
+
+Default CI and the deterministic demo must not require live provider
+credentials. Any live adapter use must be explicit, scoped, recorded, and
+separable from the hermetic tracer path.
+
+Credential material must never be projected into public run bundles. Secret-like
+content in prompts, logs, diffs, dossiers, or artifacts must be classified,
+redacted, or quarantined according to policy.
 
 ## Network and Credential Policy
 
-Network access is denied unless the `RunSpec` explicitly permits it for a named station. Live credentials are denied for hermetic tracer runs. If a tool requires credentials, Conveyor records a blocked finding rather than inventing or reusing ambient secrets.
+Network access is disabled by default for Phase 1 station execution. Any network
+or credential expansion must be explicit in policy, tied to a station purpose,
+recorded as evidence, and blocked when it exceeds the L1 contract.
 
-Evidence must never depend on hidden credentials to be understood. A reviewer should be able to inspect the run bundle without privileged access.
+## Evidence Policy
+
+Agent self-report is not evidence. Evidence must come from conductor-owned
+verification:
+
+- Contract and policy refs.
+- Base and head identifiers.
+- Clean workspace materialization.
+- Command specs, decisions, outputs, timings, and digests.
+- Acceptance criteria mapping.
+- Test and quality results.
+- Review and gate outputs.
+- Artifact manifest and root digest.
+- Known risks and residual findings.
+
+## Human Control
+
+Human approval is required for:
+
+- Merge.
+- Deploy.
+- Release.
+- Contract weakening.
+- Policy weakening.
+- Acceptance weakening.
+- Required test removal or replacement.
+- Expansion of credentials, network, or protected write roots.
+
+The default Phase 1 autonomy is L1 assisted implementation.
 
 ## Gate Behavior
 
-The gate is deterministic. It may pass, fail, or block. It must name the policy rule, missing evidence, failing check, or human decision required before any downstream action.
+The gate fails closed on missing evidence, policy violations, unsupported schema
+versions, stale canary health, reviewer health failures, secret findings, or
+clean-workspace verification failures. Gate output is evidence, not permission
+to merge or deploy.
 
-The gate does not merge or deploy in Phase 1. It prepares PR-quality evidence and stops.
+## Threat Classes
 
-## Factory-Kernel Primitives
+Phase 0/1 policy must account for:
 
-The factory-kernel primitives that must not be cut are `RunSpec`, `TaskSpec`, `StationPlan`, `ToolInvocation`, `EvidenceRecord`, `ReviewRecord`, `GateDecision`, and `RunBundle`. Removing one of these primitives removes the evidence chain needed for safety.
+- Malicious repository content.
+- Malicious tool output.
+- Policy evasion.
+- Test weakening.
+- Secret exposure.
+- Supply-chain drift.
+- Artifact tampering.
+- Reviewer rubber stamps.
+- Gate false negatives.
+- Internal database probing.
+- Host escape or overreach.
+
+The dedicated threat-model bead will add fixtures and coverage for these
+classes. This contract defines the minimum boundary that implementation must
+respect.
 
 ## Failure Handling
 
-Failures are first-class evidence. A failed command, missing section, stale canary, schema violation, policy denial, or reviewer objection must produce a structured finding with severity, category, station, path, and reproduction pointer.
-
-Retries must not hide the original failure. They may add evidence but must preserve the first failing transcript.
+Safety failures must stop the affected station or run with structured findings.
+The system should preserve enough evidence for diagnosis while avoiding public
+projection of secrets or quarantined artifacts.
 
 ## Explicit Deferrals
 
-Deferred safety work includes production incident policy, multi-tenant authorization, secret broker integration, autonomous rollback, and L2-L4 approval flows. These are not part of the Phase 1 L1 target.
+Deferred beyond Phase 1:
+
+- Production deployment policy.
+- Organization-wide credential brokering.
+- Hosted multi-tenant isolation.
+- Automatic dependency updates.
+- Autonomous incident remediation.
+- Broad network allowlist management.
+
+## Factory-Kernel Primitives
+
+Safety depends on factory-kernel primitives that must not be cut: Policy.Engine,
+ToolExecutor, command grammar, ContractLock, locked TestPack, RunSpec,
+StationPlan, LedgerEvent, artifact digests, RunCheck, Review, Gate, canary
+health, and human approvals.
+
+## Verification Matrix Mapping
+
+This document maps to conveyor-quality-ci-evals-vmr.13. The docs validator must
+fail if required safety sections, the L1 target, or the no-auto-merge and
+no-deploy rule are removed.
 
 ## Verification Mapping
 
-`conveyor-quality-ci-evals-vmr.13` maps this policy to the docs contract check. `python3 scripts/check_docs_contract.py` emits structured findings for missing safety headings and missing invariant statements; `.github/workflows/docs-contract.yml` runs the same check in CI.
+The Phase 0/1 docs contract check maps this document to
+conveyor-quality-ci-evals-vmr.13 and emits structured findings for missing
+sections or missing invariant phrases.

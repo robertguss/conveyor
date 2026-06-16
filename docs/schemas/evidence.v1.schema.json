@@ -39,7 +39,10 @@
         "log",
         "diff",
         "screenshot",
-        "report"
+        "report",
+        "manifest",
+        "provenance",
+        "key_result"
       ]
     },
     "path": {

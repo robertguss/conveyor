@@ -1,0 +1,181 @@
+{
+  "schema": "conveyor.policy_profiles@1",
+  "matrix_ref": "conveyor-quality-ci-evals-vmr.13",
+  "issue_id": "conveyor-safety-policy-sandbox-qsn.3",
+  "policy_contract": {
+    "default_decision": "block",
+    "decision_schema": "conveyor.policy_decision@1",
+    "incident_schema": "conveyor.policy_incident@1",
+    "phase1_autonomy_ceiling": "L1",
+    "notes": [
+      "False positives are acceptable in Phase 1; silent bypasses are not.",
+      "Deploy, release, publish, force push, credential access, production database access, and host-overreach commands are blocked at L0-L2.",
+      "All executable station commands must be normalized before policy evaluation."
+    ]
+  },
+  "denylist_classes": {
+    "destructive_fs": {
+      "severity": "critical",
+      "incident_required": true,
+      "description": "Deletes, recursively removes, or overwrites workspace or host data without an explicit human-approved destructive command.",
+      "blocked_patterns": ["rm -rf", "git clean -fd", "find -delete", "truncate", "shred"]
+    },
+    "dangerous_git": {
+      "severity": "critical",
+      "incident_required": true,
+      "description": "Destroys history or discards worktree state.",
+      "blocked_patterns": ["git reset --hard", "git checkout --", "git restore --source", "git clean"]
+    },
+    "force_push": {
+      "severity": "critical",
+      "incident_required": true,
+      "description": "Rewrites remote branch history or bypasses normal review publication.",
+      "blocked_patterns": ["git push --force", "git push -f", "git push --mirror"]
+    },
+    "chmod_chown_outside_workspace": {
+      "severity": "high",
+      "incident_required": true,
+      "description": "Changes ownership or permissions outside the declared workspace roots.",
+      "blocked_patterns": ["chmod /", "chown /", "chmod -R", "chown -R"]
+    },
+    "pipe_to_shell_installer": {
+      "severity": "high",
+      "incident_required": true,
+      "description": "Executes network-fetched scripts directly in a shell.",
+      "blocked_patterns": ["curl | sh", "curl | bash", "wget | sh", "wget | bash", "| sh", "| bash"]
+    },
+    "sudo": {
+      "severity": "critical",
+      "incident_required": true,
+      "description": "Escalates privileges outside the sandbox contract.",
+      "blocked_patterns": ["sudo", "doas", "su -"]
+    },
+    "credential_access": {
+      "severity": "critical",
+      "incident_required": true,
+      "description": "Reads, prints, exports, or exfiltrates credentials without a CredentialLease.",
+      "blocked_patterns": ["cat .env", "printenv", "aws configure", "gcloud auth", "op read"]
+    },
+    "prod_db_url": {
+      "severity": "critical",
+      "incident_required": true,
+      "description": "Uses a production database URL or production credential in Phase 0/1 execution.",
+      "blocked_patterns": ["DATABASE_URL=postgres://prod", "prod-db", "production database"]
+    },
+    "unapproved_package_install": {
+      "severity": "high",
+      "incident_required": true,
+      "description": "Installs packages outside the approved project dependency workflow.",
+      "blocked_patterns": ["npm install -g", "pip install", "curl install", "apt install", "brew install"]
+    },
+    "unapproved_network": {
+      "severity": "high",
+      "incident_required": true,
+      "description": "Uses network egress where the station profile did not approve it.",
+      "blocked_patterns": ["curl https://", "wget https://", "ssh ", "scp "]
+    },
+    "deploy_publish_l0_l2": {
+      "severity": "critical",
+      "incident_required": true,
+      "description": "Deploys, releases, publishes, or otherwise changes external production state at L0-L2.",
+      "blocked_patterns": ["fly deploy", "kubectl apply", "npm publish", "docker push", "mix hex.publish"]
+    }
+  },
+  "profiles": {
+    "explore": {
+      "autonomy_ceiling": "L1",
+      "allowed_intents": ["read", "list", "inspect", "search"],
+      "allowed_command_families": ["rg", "find", "git status", "git log", "sed", "python3"],
+      "network_policy": "deny_by_default",
+      "denied_classes": [
+        "destructive_fs",
+        "dangerous_git",
+        "force_push",
+        "chmod_chown_outside_workspace",
+        "pipe_to_shell_installer",
+        "sudo",
+        "credential_access",
+        "prod_db_url",
+        "unapproved_package_install",
+        "unapproved_network",
+        "deploy_publish_l0_l2"
+      ]
+    },
+    "implement": {
+      "autonomy_ceiling": "L1",
+      "allowed_intents": ["edit", "format", "local_build", "local_test"],
+      "allowed_command_families": ["apply_patch", "mix", "python3", "cargo", "bun", "go", "git status", "git diff"],
+      "network_policy": "deny_by_default",
+      "denied_classes": [
+        "destructive_fs",
+        "dangerous_git",
+        "force_push",
+        "chmod_chown_outside_workspace",
+        "pipe_to_shell_installer",
+        "sudo",
+        "credential_access",
+        "prod_db_url",
+        "unapproved_package_install",
+        "unapproved_network",
+        "deploy_publish_l0_l2"
+      ]
+    },
+    "verify": {
+      "autonomy_ceiling": "L1",
+      "allowed_intents": ["test", "lint", "schema_check", "replay_fixture"],
+      "allowed_command_families": ["mix test", "mix format", "python3", "ubs", "cargo test", "bun test", "go test"],
+      "network_policy": "deny_by_default",
+      "denied_classes": [
+        "destructive_fs",
+        "dangerous_git",
+        "force_push",
+        "chmod_chown_outside_workspace",
+        "pipe_to_shell_installer",
+        "sudo",
+        "credential_access",
+        "prod_db_url",
+        "unapproved_package_install",
+        "unapproved_network",
+        "deploy_publish_l0_l2"
+      ]
+    },
+    "release": {
+      "autonomy_ceiling": "L1",
+      "allowed_intents": ["draft_release_notes", "package_report", "verify_artifacts"],
+      "allowed_command_families": ["git status", "git diff", "mix conveyor.report", "python3"],
+      "network_policy": "deny_by_default",
+      "denied_classes": [
+        "destructive_fs",
+        "dangerous_git",
+        "force_push",
+        "chmod_chown_outside_workspace",
+        "pipe_to_shell_installer",
+        "sudo",
+        "credential_access",
+        "prod_db_url",
+        "unapproved_package_install",
+        "unapproved_network",
+        "deploy_publish_l0_l2"
+      ]
+    },
+    "maintenance": {
+      "autonomy_ceiling": "L1",
+      "allowed_intents": ["doctor", "local_cache_inspect", "non_destructive_cleanup_plan"],
+      "allowed_command_families": ["mix conveyor.doctor", "python3", "git status", "du", "df"],
+      "network_policy": "deny_by_default",
+      "denied_classes": [
+        "destructive_fs",
+        "dangerous_git",
+        "force_push",
+        "chmod_chown_outside_workspace",
+        "pipe_to_shell_installer",
+        "sudo",
+        "credential_access",
+        "prod_db_url",
+        "unapproved_package_install",
+        "unapproved_network",
+        "deploy_publish_l0_l2"
+      ]
+    }
+  }
+}

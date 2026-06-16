@@ -15,6 +15,9 @@ This directory is the local registry for Phase 0/1 public artifact schemas. The 
 | Review record | `review@1` | `review.v1.schema.json` |
 | Gate decision | `gate@1` | `gate.v1.schema.json` |
 | Run bundle index | `run_bundle@1` | `run_bundle.v1.schema.json` |
+| Artifact manifest | `manifest@1` | `manifest.v1.schema.json` |
+| Provenance record | `provenance@1` | `provenance.v1.schema.json` |
+| Key result artifact | `key_result@1` | `key_result.v1.schema.json` |
 
 Every artifact carries a required `schema_version` field whose value must exactly match one registered version. Unknown artifacts and unsupported versions are hard failures; Conveyor must emit a structured finding instead of best-effort parsing.
 
