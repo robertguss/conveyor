@@ -2,6 +2,13 @@ defmodule Conveyor.PlanImportTest do
   use ExUnit.Case, async: false
 
   alias Conveyor.PlanImport
+  alias Conveyor.Repo
+
+  setup do
+    :ok = Ecto.Adapters.SQL.Sandbox.checkout(Repo)
+    Ecto.Adapters.SQL.Sandbox.mode(Repo, {:shared, self()})
+    :ok
+  end
 
   test "parses sidecar YAML into a handoff-ready normalized contract and persists the plan" do
     plan_id = unique_plan_id("yaml")
