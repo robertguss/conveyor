@@ -88,6 +88,19 @@ defmodule Conveyor.Domain.Resources do
   @schema_version "conveyor.domain_resource_contract@1"
   @immutable_fields [:id, :external_id, :inserted_at]
   @append_only_resources [Conveyor.Domain.LedgerEvent]
+  @execution_resources [
+    Conveyor.Domain.RunAttempt,
+    Conveyor.Domain.AgentSession,
+    Conveyor.Domain.PatchSet,
+    Conveyor.Domain.RiskAssessment,
+    Conveyor.Domain.StationRun,
+    Conveyor.Domain.Evidence,
+    Conveyor.Domain.ToolInvocation,
+    Conveyor.Domain.Review,
+    Conveyor.Domain.GateResult,
+    Conveyor.Domain.CodeQualityRun,
+    Conveyor.Domain.WorkspaceMaterialization
+  ]
   @resource_specs [
     {Conveyor.Domain.Project, :projects},
     {Conveyor.Domain.ToolchainProfile, :toolchain_profiles},
@@ -142,6 +155,7 @@ defmodule Conveyor.Domain.Resources do
   def table_names, do: Enum.map(@resource_specs, &elem(&1, 1))
   def immutable_fields, do: @immutable_fields
   def append_only_resources, do: @append_only_resources
+  def execution_resources, do: @execution_resources
 
   def migration_log do
     %{
@@ -183,6 +197,16 @@ defmodule Conveyor.Domain.PayloadHelpers do
 
   def normalize_map(_map), do: raise(ArgumentError, "payload metadata must be a map")
 
+  def normalize_list(values) when is_list(values), do: Enum.map(values, &normalize_payload/1)
+  def normalize_list(_values), do: raise(ArgumentError, "payload value must be a list")
+
+  def normalize_payload(%DateTime{} = datetime), do: iso8601(datetime)
+  def normalize_payload(value), do: normalize_value(value)
+
+  def get(map, key, default \\ nil) when is_map(map) do
+    Map.get(map, key, Map.get(map, to_string(key), default))
+  end
+
   def sha256_binary(binary) when is_binary(binary) do
     "sha256:" <>
       (:crypto.hash(:sha256, binary)
@@ -196,6 +220,7 @@ defmodule Conveyor.Domain.PayloadHelpers do
   def iso8601(%DateTime{} = datetime), do: DateTime.to_iso8601(datetime)
   def iso8601(value) when is_binary(value), do: value
 
+  defp normalize_value(%DateTime{} = datetime), do: iso8601(datetime)
   defp normalize_value(value) when is_map(value), do: normalize_map(value)
   defp normalize_value(value) when is_list(value), do: Enum.map(value, &normalize_value/1)
   defp normalize_value(value), do: value
@@ -217,6 +242,135 @@ defmodule Conveyor.Domain.PayloadHelpers do
   end
 
   defp canonical_json(value), do: Jason.encode!(value)
+end
+
+defmodule Conveyor.Domain.ExecutionPayload do
+  @moduledoc false
+
+  alias Conveyor.Domain.PayloadHelpers
+
+  def build!(schema_version, attrs, required_keys, optional_defaults \\ %{}, optional_keys \\ [])
+      when is_map(attrs) do
+    required =
+      Map.new(required_keys, fn key ->
+        {to_string(key), attrs |> PayloadHelpers.fetch_required!(key) |> normalize()}
+      end)
+
+    with_defaults =
+      Enum.reduce(optional_defaults, required, fn {key, default}, acc ->
+        Map.put(acc, to_string(key), attrs |> PayloadHelpers.get(key, default) |> normalize())
+      end)
+
+    optional =
+      Enum.reduce(optional_keys, with_defaults, fn key, acc ->
+        case PayloadHelpers.get(attrs, key) do
+          nil -> acc
+          value -> Map.put(acc, to_string(key), normalize(value))
+        end
+      end)
+
+    Map.put(optional, "schema_version", schema_version)
+  end
+
+  def create_attrs!(payload, id_key, name_key) when is_map(payload) do
+    %{
+      external_id: fetch_payload!(payload, id_key),
+      name: payload |> fetch_payload!(name_key) |> to_string(),
+      status: "active",
+      payload: payload
+    }
+  end
+
+  defp fetch_payload!(payload, key) do
+    Map.fetch!(payload, to_string(key))
+  end
+
+  defp normalize(value), do: PayloadHelpers.normalize_payload(value)
+end
+
+defmodule Conveyor.Domain.ExecutionResources do
+  @moduledoc """
+  Payload-level association helpers for execution resources.
+
+  The Phase 0 schema stores most execution references inside resource payloads.
+  These summaries make those associations auditable until later beads promote
+  selected references into dedicated relational columns.
+  """
+
+  @schema_version "conveyor.execution_association_summary@1"
+
+  def association_summary(attrs) when is_map(attrs) do
+    run_attempts = payloads(attrs, :run_attempts)
+    station_runs = payloads(attrs, :station_runs)
+    agent_sessions = payloads(attrs, :agent_sessions)
+    patch_sets = payloads(attrs, :patch_sets)
+    tool_invocations = payloads(attrs, :tool_invocations)
+    reviews = payloads(attrs, :reviews)
+    gate_results = payloads(attrs, :gate_results)
+    evidence = payloads(attrs, :evidence)
+    code_quality_runs = payloads(attrs, :code_quality_runs)
+    workspace_materializations = payloads(attrs, :workspace_materializations)
+    risk_assessments = payloads(attrs, :risk_assessments)
+
+    %{
+      schema_version: @schema_version,
+      category: "execution_resource_association",
+      slice_attempts: slice_attempts(run_attempts),
+      run_attempt_ids: values(run_attempts, "run_attempt_id"),
+      station_runs: project(station_runs, ["station_run_id", "run_attempt_id", "station_key"]),
+      agent_sessions:
+        project(agent_sessions, [
+          "agent_session_id",
+          "run_attempt_id",
+          "station_run_id",
+          "adapter",
+          "session_role"
+        ]),
+      patch_sets: project(patch_sets, ["patch_set_id", "run_attempt_id", "station_run_id"]),
+      tool_invocations:
+        project(tool_invocations, [
+          "tool_invocation_id",
+          "run_attempt_id",
+          "station_run_id",
+          "agent_session_id"
+        ]),
+      review_ids: values(reviews, "review_id"),
+      gate_result_ids: values(gate_results, "gate_result_id"),
+      evidence_ids: values(evidence, "evidence_id"),
+      code_quality_run_ids: values(code_quality_runs, "code_quality_run_id"),
+      workspace_materialization_ids: values(workspace_materializations, "workspace_id"),
+      risk_assessment_ids: values(risk_assessments, "risk_assessment_id"),
+      independently_queryable: ["reviews", "gate_results"]
+    }
+  end
+
+  defp payloads(attrs, key) do
+    attrs
+    |> Conveyor.Domain.PayloadHelpers.get(key, [])
+    |> Enum.map(&payload/1)
+  end
+
+  defp payload(%{payload: payload}) when is_map(payload), do: payload
+  defp payload(payload) when is_map(payload), do: payload
+
+  defp slice_attempts(run_attempts) do
+    run_attempts
+    |> Enum.group_by(&Map.fetch!(&1, "slice_id"))
+    |> Enum.map(fn {slice_id, attempts} ->
+      %{
+        slice_id: slice_id,
+        attempt_count: length(attempts),
+        run_attempt_ids: values(attempts, "run_attempt_id")
+      }
+    end)
+    |> Enum.sort_by(& &1.slice_id)
+  end
+
+  defp project(payloads, keys) do
+    Enum.map(payloads, fn payload -> Map.take(payload, keys) end)
+  end
+
+  defp values(payloads, key), do: Enum.map(payloads, &Map.fetch!(&1, key))
 end
 
 defmodule Conveyor.Domain.Project do
@@ -443,6 +597,24 @@ end
 
 defmodule Conveyor.Domain.CodeQualityRun do
   use Conveyor.Domain.ActiveResource, table: "code_quality_runs"
+
+  @schema_version "conveyor.code_quality_run@1"
+
+  def build!(attrs) when is_map(attrs) do
+    Conveyor.Domain.ExecutionPayload.build!(
+      @schema_version,
+      attrs,
+      [:code_quality_run_id, :run_attempt_id, :station_run_id, :adapter, :decision],
+      %{quality_status: "completed"},
+      [:findings, :artifact_refs, :metadata]
+    )
+  end
+
+  def create_attrs!(attrs) when is_map(attrs) do
+    attrs
+    |> build!()
+    |> Conveyor.Domain.ExecutionPayload.create_attrs!(:code_quality_run_id, :adapter)
+  end
 end
 
 defmodule Conveyor.Domain.RunPrompt do
@@ -644,6 +816,24 @@ end
 
 defmodule Conveyor.Domain.WorkspaceMaterialization do
   use Conveyor.Domain.ActiveResource, table: "workspace_materializations"
+
+  @schema_version "conveyor.workspace_materialization@1"
+
+  def build!(attrs) when is_map(attrs) do
+    Conveyor.Domain.ExecutionPayload.build!(
+      @schema_version,
+      attrs,
+      [:workspace_id, :run_attempt_id, :base_commit, :path_digest],
+      %{materialized_at: nil},
+      [:root_path, :container_image_digest, :metadata]
+    )
+  end
+
+  def create_attrs!(attrs) when is_map(attrs) do
+    attrs
+    |> build!()
+    |> Conveyor.Domain.ExecutionPayload.create_attrs!(:workspace_id, :run_attempt_id)
+  end
 end
 
 defmodule Conveyor.Domain.AgentProfile do
@@ -652,38 +842,225 @@ end
 
 defmodule Conveyor.Domain.RunAttempt do
   use Conveyor.Domain.ActiveResource, table: "run_attempts"
+
+  @schema_version "conveyor.run_attempt@1"
+
+  def build!(attrs) when is_map(attrs) do
+    Conveyor.Domain.ExecutionPayload.build!(
+      @schema_version,
+      attrs,
+      [:run_attempt_id, :slice_id, :run_spec_sha256, :attempt_number],
+      %{attempt_status: "planned"},
+      [:station_plan_sha256, :previous_run_attempt_id, :metadata]
+    )
+  end
+
+  def create_attrs!(attrs) when is_map(attrs) do
+    payload = build!(attrs)
+
+    %{
+      external_id: payload["run_attempt_id"],
+      name: "#{payload["slice_id"]}##{payload["attempt_number"]}",
+      status: "active",
+      payload: payload
+    }
+  end
 end
 
 defmodule Conveyor.Domain.AgentSession do
   use Conveyor.Domain.ActiveResource, table: "agent_sessions"
+
+  @schema_version "conveyor.agent_session@1"
+
+  def build!(attrs) when is_map(attrs) do
+    Conveyor.Domain.ExecutionPayload.build!(
+      @schema_version,
+      attrs,
+      [
+        :agent_session_id,
+        :run_attempt_id,
+        :station_run_id,
+        :adapter,
+        :agent_profile_id,
+        :started_at
+      ],
+      %{session_role: "adapter_output", session_status: "running"},
+      [:completed_at, :transcript_ref, :capability_report, :metadata]
+    )
+  end
+
+  def create_attrs!(attrs) when is_map(attrs) do
+    attrs
+    |> build!()
+    |> Conveyor.Domain.ExecutionPayload.create_attrs!(:agent_session_id, :adapter)
+  end
 end
 
 defmodule Conveyor.Domain.PatchSet do
   use Conveyor.Domain.ActiveResource, table: "patch_sets"
+
+  @schema_version "conveyor.patch_set@1"
+
+  def build!(attrs) when is_map(attrs) do
+    Conveyor.Domain.ExecutionPayload.build!(
+      @schema_version,
+      attrs,
+      [:patch_set_id, :run_attempt_id, :station_run_id, :diff_sha256],
+      %{patch_status: "proposed"},
+      [:base_commit, :summary, :files, :tool_invocation_ids, :metadata]
+    )
+  end
+
+  def create_attrs!(attrs) when is_map(attrs) do
+    attrs
+    |> build!()
+    |> Conveyor.Domain.ExecutionPayload.create_attrs!(:patch_set_id, :station_run_id)
+  end
 end
 
 defmodule Conveyor.Domain.RiskAssessment do
   use Conveyor.Domain.ActiveResource, table: "risk_assessments"
+
+  @schema_version "conveyor.risk_assessment@1"
+
+  def build!(attrs) when is_map(attrs) do
+    Conveyor.Domain.ExecutionPayload.build!(
+      @schema_version,
+      attrs,
+      [:risk_assessment_id, :run_attempt_id, :station_run_id, :risk_level, :policy],
+      %{},
+      [:factors, :review_required, :metadata]
+    )
+  end
+
+  def create_attrs!(attrs) when is_map(attrs) do
+    attrs
+    |> build!()
+    |> Conveyor.Domain.ExecutionPayload.create_attrs!(:risk_assessment_id, :risk_level)
+  end
 end
 
 defmodule Conveyor.Domain.StationRun do
   use Conveyor.Domain.ActiveResource, table: "station_runs"
+
+  @schema_version "conveyor.station_run@1"
+
+  def build!(attrs) when is_map(attrs) do
+    Conveyor.Domain.ExecutionPayload.build!(
+      @schema_version,
+      attrs,
+      [
+        :station_run_id,
+        :run_attempt_id,
+        :station_key,
+        :station_spec_sha256,
+        :attempt_number
+      ],
+      %{station_status: "planned"},
+      [:input_sha256, :output_sha256, :idempotency_key, :metadata]
+    )
+  end
+
+  def create_attrs!(attrs) when is_map(attrs) do
+    attrs
+    |> build!()
+    |> Conveyor.Domain.ExecutionPayload.create_attrs!(:station_run_id, :station_key)
+  end
 end
 
 defmodule Conveyor.Domain.Evidence do
   use Conveyor.Domain.ActiveResource, table: "evidence"
+
+  @schema_version "conveyor.evidence@1"
+
+  def build!(attrs) when is_map(attrs) do
+    Conveyor.Domain.ExecutionPayload.build!(
+      @schema_version,
+      attrs,
+      [:evidence_id, :run_attempt_id, :station_run_id, :artifact_sha256, :evidence_type],
+      %{},
+      [:requirement_ids, :summary, :metadata]
+    )
+  end
+
+  def create_attrs!(attrs) when is_map(attrs) do
+    attrs
+    |> build!()
+    |> Conveyor.Domain.ExecutionPayload.create_attrs!(:evidence_id, :evidence_type)
+  end
 end
 
 defmodule Conveyor.Domain.ToolInvocation do
   use Conveyor.Domain.ActiveResource, table: "tool_invocations"
+
+  @schema_version "conveyor.tool_invocation@1"
+
+  def build!(attrs) when is_map(attrs) do
+    Conveyor.Domain.ExecutionPayload.build!(
+      @schema_version,
+      attrs,
+      [
+        :tool_invocation_id,
+        :run_attempt_id,
+        :station_run_id,
+        :agent_session_id,
+        :command_ref,
+        :started_at
+      ],
+      %{tool_status: "running"},
+      [:completed_at, :exit_code, :artifact_refs, :metadata]
+    )
+  end
+
+  def create_attrs!(attrs) when is_map(attrs) do
+    attrs
+    |> build!()
+    |> Conveyor.Domain.ExecutionPayload.create_attrs!(:tool_invocation_id, :command_ref)
+  end
 end
 
 defmodule Conveyor.Domain.Review do
   use Conveyor.Domain.ActiveResource, table: "reviews"
+
+  @schema_version "conveyor.review@1"
+
+  def build!(attrs) when is_map(attrs) do
+    Conveyor.Domain.ExecutionPayload.build!(
+      @schema_version,
+      attrs,
+      [:review_id, :run_attempt_id, :station_run_id, :reviewer_profile_id, :decision],
+      %{},
+      [:findings, :evidence_refs, :gate_result_id, :metadata]
+    )
+  end
+
+  def create_attrs!(attrs) when is_map(attrs) do
+    attrs
+    |> build!()
+    |> Conveyor.Domain.ExecutionPayload.create_attrs!(:review_id, :decision)
+  end
 end
 
 defmodule Conveyor.Domain.GateResult do
   use Conveyor.Domain.ActiveResource, table: "gate_results"
+
+  @schema_version "conveyor.gate_result@1"
+
+  def build!(attrs) when is_map(attrs) do
+    Conveyor.Domain.ExecutionPayload.build!(
+      @schema_version,
+      attrs,
+      [:gate_result_id, :run_attempt_id, :station_run_id, :decision, :suite_kind],
+      %{},
+      [:review_id, :evidence_refs, :finding_refs, :metadata]
+    )
+  end
+
+  def create_attrs!(attrs) when is_map(attrs) do
+    attrs
+    |> build!()
+    |> Conveyor.Domain.ExecutionPayload.create_attrs!(:gate_result_id, :decision)
+  end
 end
 
 defmodule Conveyor.Domain.Artifact do

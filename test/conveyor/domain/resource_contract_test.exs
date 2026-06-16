@@ -337,6 +337,212 @@ defmodule Conveyor.Domain.ResourceContractTest do
     assert record.payload["classification"] == "exact"
   end
 
+  test "execution resources preserve run, station, session, tool, review, and gate links" do
+    first_attempt =
+      Conveyor.Domain.RunAttempt.build!(%{
+        run_attempt_id: "exec-run-attempt-001",
+        slice_id: "slice-demo",
+        run_spec_sha256: "sha256:run-spec-demo",
+        attempt_number: 1
+      })
+
+    retry_attempt =
+      Conveyor.Domain.RunAttempt.build!(%{
+        run_attempt_id: "exec-run-attempt-002",
+        slice_id: "slice-demo",
+        run_spec_sha256: "sha256:run-spec-demo-v2",
+        attempt_number: 2,
+        previous_run_attempt_id: "exec-run-attempt-001"
+      })
+
+    assert first_attempt["slice_id"] == retry_attempt["slice_id"]
+    assert first_attempt["run_attempt_id"] != retry_attempt["run_attempt_id"]
+
+    station_run =
+      Conveyor.Domain.StationRun.build!(%{
+        station_run_id: "exec-station-run-001",
+        run_attempt_id: first_attempt["run_attempt_id"],
+        station_key: "implement",
+        station_spec_sha256: "sha256:station-implement",
+        attempt_number: 1,
+        input_sha256: "sha256:station-input",
+        output_sha256: "sha256:station-output"
+      })
+
+    agent_session =
+      Conveyor.Domain.AgentSession.build!(%{
+        agent_session_id: "exec-agent-session-001",
+        run_attempt_id: first_attempt["run_attempt_id"],
+        station_run_id: station_run["station_run_id"],
+        adapter: "codex",
+        agent_profile_id: "agent-profile-implementer",
+        started_at: ~U[2026-06-16 21:10:00Z],
+        transcript_ref: "artifact://transcripts/exec-agent-session-001.jsonl"
+      })
+
+    assert agent_session["session_role"] == "adapter_output"
+    refute agent_session["agent_session_id"] == first_attempt["run_attempt_id"]
+
+    patch_set =
+      Conveyor.Domain.PatchSet.build!(%{
+        patch_set_id: "exec-patch-set-001",
+        run_attempt_id: first_attempt["run_attempt_id"],
+        station_run_id: station_run["station_run_id"],
+        diff_sha256: "sha256:diff-001",
+        tool_invocation_ids: ["exec-tool-invocation-001"]
+      })
+
+    tool_invocation =
+      Conveyor.Domain.ToolInvocation.build!(%{
+        tool_invocation_id: "exec-tool-invocation-001",
+        run_attempt_id: first_attempt["run_attempt_id"],
+        station_run_id: station_run["station_run_id"],
+        agent_session_id: agent_session["agent_session_id"],
+        command_ref: "cmd://mix-test-resource-contract",
+        started_at: ~U[2026-06-16 21:11:00Z],
+        exit_code: 0,
+        artifact_refs: ["sha256:test-log"]
+      })
+
+    review =
+      Conveyor.Domain.Review.build!(%{
+        review_id: "exec-review-001",
+        run_attempt_id: first_attempt["run_attempt_id"],
+        station_run_id: station_run["station_run_id"],
+        reviewer_profile_id: "agent-profile-reviewer",
+        decision: "approve",
+        findings: [%{severity: "info", message: "Evidence covers linked station output."}],
+        evidence_refs: ["exec-evidence-001"]
+      })
+
+    gate_result =
+      Conveyor.Domain.GateResult.build!(%{
+        gate_result_id: "exec-gate-result-001",
+        run_attempt_id: first_attempt["run_attempt_id"],
+        station_run_id: station_run["station_run_id"],
+        review_id: review["review_id"],
+        decision: "pass",
+        suite_kind: "focused",
+        evidence_refs: ["exec-evidence-001"]
+      })
+
+    evidence =
+      Conveyor.Domain.Evidence.build!(%{
+        evidence_id: "exec-evidence-001",
+        run_attempt_id: first_attempt["run_attempt_id"],
+        station_run_id: station_run["station_run_id"],
+        artifact_sha256: "sha256:evidence-artifact",
+        evidence_type: "test_log",
+        requirement_ids: ["REQ-001"]
+      })
+
+    quality_run =
+      Conveyor.Domain.CodeQualityRun.build!(%{
+        code_quality_run_id: "exec-quality-run-001",
+        run_attempt_id: first_attempt["run_attempt_id"],
+        station_run_id: station_run["station_run_id"],
+        adapter: "noop",
+        decision: "advisory_pass",
+        artifact_refs: ["sha256:quality-report"]
+      })
+
+    workspace =
+      Conveyor.Domain.WorkspaceMaterialization.build!(%{
+        workspace_id: "exec-workspace-001",
+        run_attempt_id: first_attempt["run_attempt_id"],
+        base_commit: "abc1234",
+        path_digest: "sha256:workspace-path",
+        materialized_at: ~U[2026-06-16 21:09:00Z]
+      })
+
+    risk_assessment =
+      Conveyor.Domain.RiskAssessment.build!(%{
+        risk_assessment_id: "exec-risk-001",
+        run_attempt_id: first_attempt["run_attempt_id"],
+        station_run_id: station_run["station_run_id"],
+        risk_level: "medium",
+        policy: "phase1-default",
+        factors: ["touches_domain"]
+      })
+
+    records = [
+      {
+        Conveyor.Domain.RunAttempt,
+        Map.put(Conveyor.Domain.RunAttempt.create_attrs!(first_attempt), :status, "archived")
+      },
+      {Conveyor.Domain.RunAttempt, Conveyor.Domain.RunAttempt.create_attrs!(retry_attempt)},
+      {Conveyor.Domain.StationRun, Conveyor.Domain.StationRun.create_attrs!(station_run)},
+      {Conveyor.Domain.AgentSession, Conveyor.Domain.AgentSession.create_attrs!(agent_session)},
+      {Conveyor.Domain.PatchSet, Conveyor.Domain.PatchSet.create_attrs!(patch_set)},
+      {Conveyor.Domain.ToolInvocation,
+       Conveyor.Domain.ToolInvocation.create_attrs!(tool_invocation)},
+      {Conveyor.Domain.Review, Conveyor.Domain.Review.create_attrs!(review)},
+      {Conveyor.Domain.GateResult, Conveyor.Domain.GateResult.create_attrs!(gate_result)},
+      {Conveyor.Domain.Evidence, Conveyor.Domain.Evidence.create_attrs!(evidence)},
+      {Conveyor.Domain.CodeQualityRun, Conveyor.Domain.CodeQualityRun.create_attrs!(quality_run)},
+      {
+        Conveyor.Domain.WorkspaceMaterialization,
+        Conveyor.Domain.WorkspaceMaterialization.create_attrs!(workspace)
+      },
+      {Conveyor.Domain.RiskAssessment,
+       Conveyor.Domain.RiskAssessment.create_attrs!(risk_assessment)}
+    ]
+
+    for {resource, attrs} <- records do
+      assert {:ok, record} = Ash.create(resource, attrs, action: :create)
+      assert record.payload["run_attempt_id"] || record.payload["workspace_id"]
+    end
+
+    assert %{
+             schema_version: "conveyor.execution_association_summary@1",
+             category: "execution_resource_association",
+             slice_attempts: [
+               %{
+                 slice_id: "slice-demo",
+                 attempt_count: 2,
+                 run_attempt_ids: ["exec-run-attempt-001", "exec-run-attempt-002"]
+               }
+             ],
+             agent_sessions: [
+               %{
+                 "agent_session_id" => "exec-agent-session-001",
+                 "run_attempt_id" => "exec-run-attempt-001",
+                 "station_run_id" => "exec-station-run-001",
+                 "adapter" => "codex",
+                 "session_role" => "adapter_output"
+               }
+             ],
+             patch_sets: [%{"patch_set_id" => "exec-patch-set-001"}],
+             tool_invocations: [%{"tool_invocation_id" => "exec-tool-invocation-001"}],
+             review_ids: ["exec-review-001"],
+             gate_result_ids: ["exec-gate-result-001"],
+             evidence_ids: ["exec-evidence-001"],
+             code_quality_run_ids: ["exec-quality-run-001"],
+             workspace_materialization_ids: ["exec-workspace-001"],
+             risk_assessment_ids: ["exec-risk-001"],
+             independently_queryable: ["reviews", "gate_results"]
+           } =
+             Conveyor.Domain.ExecutionResources.association_summary(%{
+               run_attempts: [first_attempt, retry_attempt],
+               station_runs: [station_run],
+               agent_sessions: [agent_session],
+               patch_sets: [patch_set],
+               tool_invocations: [tool_invocation],
+               reviews: [review],
+               gate_results: [gate_result],
+               evidence: [evidence],
+               code_quality_runs: [quality_run],
+               workspace_materializations: [workspace],
+               risk_assessments: [risk_assessment]
+             })
+
+    assert {:ok, reviews} = Ash.read(Conveyor.Domain.Review, action: :read)
+    assert Enum.any?(reviews, &(&1.payload["review_id"] == "exec-review-001"))
+
+    assert {:ok, gate_results} = Ash.read(Conveyor.Domain.GateResult, action: :read)
+    assert Enum.any?(gate_results, &(&1.payload["gate_result_id"] == "exec-gate-result-001"))
+  end
+
   defp resources, do: Conveyor.Domain.Resources.resource_modules()
   defp tables, do: Conveyor.Domain.Resources.table_names()
   defp append_only_resources, do: Conveyor.Domain.Resources.append_only_resources()
