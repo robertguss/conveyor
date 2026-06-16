@@ -1,0 +1,17 @@
+name: Docs Contract
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+jobs:
+  docs-contract:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Validate Phase 0/1 docs contract
+        run: python3 scripts/check_docs_contract.py
