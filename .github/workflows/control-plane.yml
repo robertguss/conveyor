@@ -1,0 +1,59 @@
+name: Control Plane CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+jobs:
+  control-plane:
+    name: Mix baseline checks
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: conveyor_test
+          POSTGRES_PASSWORD: ci-${{ github.run_id }}-${{ github.run_attempt }}
+          POSTGRES_USER: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d conveyor_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up BEAM
+        uses: erlef/setup-beam@v1
+        with:
+          elixir-version: "1.17.3"
+          otp-version: "27.2"
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Run control-plane baseline
+        env:
+          ECTO_POOL_SIZE: "10"
+          MIX_ENV: test
+          POSTGRES_DB: conveyor_test
+          POSTGRES_HOST: localhost
+          POSTGRES_PASSWORD: ci-${{ github.run_id }}-${{ github.run_attempt }}
+          POSTGRES_PORT: "5432"
+          POSTGRES_USER: postgres
+        run: bash scripts/ci_control_plane.sh
+
+      - name: Upload control-plane CI artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: control-plane-ci
+          path: tmp/ci/control-plane

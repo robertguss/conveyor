@@ -27,13 +27,36 @@ and `PHX_LIVE_VIEW_SIGNING_SALT`. Production reads `DATABASE_URL`,
 The baseline scaffold checks are:
 
 ```bash
+export CONVEYOR_SESSION_SIGNING_SALT=<session-signing-salt>
+export PHX_SECRET_KEY_BASE=<dev-or-test-secret-key-base>
+export PHX_LIVE_VIEW_SIGNING_SALT=<live-view-signing-salt>
 mix deps.get
 mix ecto.create
 mix ecto.migrate
+mix conveyor.config_probe --config .conveyor/config.toml --output tmp/conveyor_config_probe.json
 mix conveyor.version_probe --output tmp/conveyor_version_probe.json --boot-log tmp/conveyor_boot.log
 mix test
 mix format --check-formatted
 ```
+
+The canonical local/CI entrypoint is:
+
+```bash
+bash scripts/ci_control_plane.sh
+```
+
+It writes `tmp/ci/control-plane/summary.json`,
+`tmp/ci/control-plane/stations.jsonl`, per-station logs, and the
+`conveyor.config_probe` and `conveyor.version_probe` JSON/log artifacts. Credo
+and Dialyzer stations are recorded as skipped unless their Mix tasks are
+configured.
+
+`mix conveyor.config_probe` loads `.conveyor/config.toml`, normalizes command
+specs for PlanAudit, AGENTS.md generation, policy checks, and verification,
+and writes `conveyor.config.resolution@1` JSON mapped to
+`conveyor-quality-ci-evals-vmr.13`. When a locked RunSpec is supplied, project
+config must match the locked `project_config_digest` and cannot provide
+mid-run profile or command overrides.
 
 `mix conveyor.version_probe` starts the Conveyor application, verifies the Repo,
 Oban facade, PubSub, and LiveView endpoint processes, queries Postgres for

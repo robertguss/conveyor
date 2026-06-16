@@ -1,0 +1,96 @@
+version = 1
+project_key = "conveyor"
+default_toolchain_profile = "beam"
+default_policy_profile = "implement"
+default_code_quality_profile = "elixir"
+
+[artifact_projection]
+root = "tmp/conveyor_artifacts"
+manifest = "manifest.json"
+
+[sample_repository]
+name = "fastapi_tasks"
+root = "sample_apps/fastapi_tasks"
+plan_fixture = "sample_apps/fastapi_tasks/plans/complete_tasks.md"
+
+[toolchain.profiles.beam]
+runtime = "elixir"
+
+[toolchain.profiles.python]
+runtime = "python"
+
+[policy.profiles.implement]
+autonomy_level = "L1"
+network = "disabled"
+
+[policy.profiles.implement]
+autonomy_level = "L2"
+network = "enabled"
+
+[code_quality.profiles.elixir]
+adapter = "mix"
+checks = ["format", "test"]
+
+[code_quality.profiles.python]
+adapter = "python"
+checks = ["py_compile", "plan_audit"]
+
+[commands.plan_audit]
+executable = "python3"
+argv = ["sample_apps/fastapi_tasks/scripts/plan_audit.py"]
+cwd = "."
+timeout_ms = 30000
+env_keys = []
+read_roots = ["sample_apps/fastapi_tasks"]
+write_roots = ["tmp/conveyor_artifacts"]
+network = "disabled"
+toolchain_profile = "python"
+policy_profile = "implement"
+code_quality_profile = "python"
+artifact_path = "tmp/conveyor_artifacts/plan_audit.json"
+consumers = ["plan_audit"]
+
+[commands.agents_md]
+executable = "python3"
+argv = ["scripts/verify_phase0_docs.py"]
+cwd = "."
+timeout_ms = 30000
+env_keys = []
+read_roots = ["AGENTS.md", "README.md"]
+write_roots = ["tmp/conveyor_artifacts"]
+network = "disabled"
+toolchain_profile = "python"
+policy_profile = "implement"
+code_quality_profile = "python"
+artifact_path = "tmp/conveyor_artifacts/agents_md_generation.json"
+consumers = ["agents_md"]
+
+[commands.policy]
+executable = "python3"
+argv = ["scripts/check_policy_profiles.py"]
+cwd = "."
+timeout_ms = 30000
+env_keys = []
+read_roots = ["docs/policy", "docs/fixtures/policy"]
+write_roots = ["tmp/conveyor_artifacts"]
+network = "disabled"
+toolchain_profile = "python"
+policy_profile = "implement"
+code_quality_profile = "python"
+artifact_path = "tmp/conveyor_artifacts/policy_profiles.json"
+consumers = ["policy"]
+
+[commands.verify]
+executable = "mix"
+argv = ["test"]
+cwd = "."
+timeout_ms = 120000
+env_keys = ["CONVEYOR_SESSION_SIGNING_SALT", "PHX_SECRET_KEY_BASE", "PHX_LIVE_VIEW_SIGNING_SALT"]
+read_roots = ["config", "lib", "test", "priv", "mix.exs", "mix.lock"]
+write_roots = ["tmp/conveyor_artifacts"]
+network = "disabled"
+toolchain_profile = "beam"
+policy_profile = "implement"
+code_quality_profile = "elixir"
+artifact_path = "tmp/conveyor_artifacts/mix_test.json"
+consumers = ["verification"]
