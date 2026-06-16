@@ -62,7 +62,7 @@ defmodule Conveyor.Ledger do
         id: id,
         ledger_event_id: ledger_event_id,
         channel: channel,
-        payload: payload,
+        payload: decode_payload(payload),
         committed_at: committed_at
       }
     end)
@@ -95,7 +95,7 @@ defmodule Conveyor.Ledger do
         span_id: span_id,
         event_type: event_type,
         summary: summary,
-        payload: payload,
+        payload: decode_payload(payload),
         occurred_at: occurred_at
       }
     end)
@@ -208,7 +208,7 @@ defmodule Conveyor.Ledger do
         ON CONFLICT (idempotency_key) DO NOTHING
         """,
         [
-          event.id,
+          dump_uuid!(event.id),
           event.external_id,
           event.name,
           event.status,
@@ -263,7 +263,7 @@ defmodule Conveyor.Ledger do
         )
         VALUES ($1::uuid, $2::uuid, $3, $4::jsonb, $5, $6, $7)
         """,
-        [id, event.id, channel, Jason.encode!(payload), now, now, now],
+        [dump_uuid!(id), dump_uuid!(event.id), channel, Jason.encode!(payload), now, now, now],
         log: false
       )
 
@@ -286,6 +286,16 @@ defmodule Conveyor.Ledger do
     do: Map.get(attrs, field) || Map.fetch!(attrs, Atom.to_string(field))
 
   defp present?(value), do: is_binary(value) and String.trim(value) != ""
+
+  defp decode_payload(payload) when is_binary(payload), do: Jason.decode!(payload)
+  defp decode_payload(payload), do: payload
+
+  defp dump_uuid!(uuid) do
+    case Ecto.UUID.dump(uuid) do
+      {:ok, dumped} -> dumped
+      :error -> raise ArgumentError, "expected UUID string, got: #{inspect(uuid)}"
+    end
+  end
 
   defp timestamp do
     DateTime.utc_now() |> DateTime.truncate(:microsecond)
