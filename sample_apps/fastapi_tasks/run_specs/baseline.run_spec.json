@@ -1,0 +1,27 @@
+{
+  "schema_version": "run_spec@1",
+  "project": {
+    "name": "fastapi_tasks_sample",
+    "kind": "sterile_sample",
+    "path": "sample_apps/fastapi_tasks",
+    "baseline_commit": null,
+    "baseline_commit_status": "pending_first_sample_commit"
+  },
+  "runtime": {
+    "language": "python",
+    "python_requires": ">=3.11",
+    "storage": "in_memory",
+    "production_secrets_required": false,
+    "network_egress_required": false
+  },
+  "commands": {
+    "install": "python -m pip install -e '.[test]'",
+    "baseline": "./scripts/run_baseline.sh"
+  },
+  "expected_outputs": {
+    "junitxml": "artifacts/<run_id>/pytest-junit.xml",
+    "structured_summary": "artifacts/<run_id>/baseline-summary.json",
+    "raw_log": "artifacts/<run_id>/pytest.log"
+  }
+}
+
