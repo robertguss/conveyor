@@ -55,6 +55,15 @@ defmodule Conveyor.PlanImportTest do
     markdown_report = PlanImport.lint_source(markdown, "plans/phase1.md")
     yaml_report = PlanImport.lint_source(yaml, "conveyor.plan.yml")
 
+    expected_end_line =
+      markdown
+      |> String.split("\n")
+      |> Enum.with_index(1)
+      |> Enum.find_value(fn
+        {"```", line_no} -> line_no
+        {_line, _line_no} -> nil
+      end)
+
     assert markdown_report.status == "ok"
     assert markdown_report.contract_sha256 == yaml_report.contract_sha256
 
@@ -64,7 +73,7 @@ defmodule Conveyor.PlanImportTest do
                source_path: "plans/phase1.md",
                source_kind: "markdown_fence",
                start_line: 5,
-               end_line: 34
+               end_line: ^expected_end_line
              }
            ] = markdown_report.source_refs
   end
