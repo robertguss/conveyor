@@ -1,0 +1,10 @@
+{
+  "schema_version": "evidence@1",
+  "evidence_id": "evidence-baseline-001",
+  "run_id": "run-20260616-0001",
+  "station_key": "baseline",
+  "artifact_type": "command_transcript",
+  "path": "runs/run-20260616-0001/baseline/transcript.txt",
+  "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "redaction_status": "not_required"
+}

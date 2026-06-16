@@ -1,0 +1,19 @@
+{
+  "schema_version": "conveyor.plan@1",
+  "plan_id": "plan-phase1-demo",
+  "title": "Phase 1 evidence-only demo",
+  "autonomy_level": "L1",
+  "cutline": "TRACER_REQUIRED",
+  "tasks": [
+    {
+      "task_id": "task-001",
+      "title": "Run sample tracer",
+      "acceptance": [
+        "All station outputs are captured in the run bundle."
+      ],
+      "evidence_required": [
+        "command transcript"
+      ]
+    }
+  ]
+}

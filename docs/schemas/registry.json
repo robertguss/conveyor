@@ -1,0 +1,55 @@
+{
+  "registry_version": 1,
+  "vmr_ref": "conveyor-quality-ci-evals-vmr.13",
+  "entries": [
+    {
+      "artifact": "conveyor.plan",
+      "version": "conveyor.plan@1",
+      "schema_file": "conveyor.plan.v1.schema.json",
+      "valid_example": "conveyor.plan.json",
+      "invalid_example": "conveyor.plan.missing-required.json"
+    },
+    {
+      "artifact": "run_spec",
+      "version": "run_spec@1",
+      "schema_file": "run_spec.v1.schema.json",
+      "valid_example": "run_spec.json",
+      "invalid_example": "run_spec.missing-required.json"
+    },
+    {
+      "artifact": "station_plan",
+      "version": "station_plan@1",
+      "schema_file": "station_plan.v1.schema.json",
+      "valid_example": "station_plan.json",
+      "invalid_example": "station_plan.missing-required.json"
+    },
+    {
+      "artifact": "evidence",
+      "version": "evidence@1",
+      "schema_file": "evidence.v1.schema.json",
+      "valid_example": "evidence.json",
+      "invalid_example": "evidence.missing-required.json"
+    },
+    {
+      "artifact": "review",
+      "version": "review@1",
+      "schema_file": "review.v1.schema.json",
+      "valid_example": "review.json",
+      "invalid_example": "review.missing-required.json"
+    },
+    {
+      "artifact": "gate",
+      "version": "gate@1",
+      "schema_file": "gate.v1.schema.json",
+      "valid_example": "gate.json",
+      "invalid_example": "gate.missing-required.json"
+    },
+    {
+      "artifact": "run_bundle",
+      "version": "run_bundle@1",
+      "schema_file": "run_bundle.v1.schema.json",
+      "valid_example": "run_bundle.json",
+      "invalid_example": "run_bundle.missing-required.json"
+    }
+  ]
+}

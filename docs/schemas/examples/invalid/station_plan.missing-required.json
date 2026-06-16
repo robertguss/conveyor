@@ -1,0 +1,12 @@
+{
+  "schema_version": "station_plan@1",
+  "station_key": "baseline",
+  "run_id": "run-20260616-0001",
+  "inputs": {
+    "command": "mix test"
+  },
+  "expected_outputs": [
+    "command transcript"
+  ],
+  "timeout_seconds": 600
+}

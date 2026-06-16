@@ -1,0 +1,65 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://conveyor.local/schemas/evidence@1",
+  "title": "Evidence Record",
+  "description": "A redaction-aware artifact reference produced by a station.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "evidence_id",
+    "run_id",
+    "station_key",
+    "artifact_type",
+    "path",
+    "sha256",
+    "summary",
+    "redaction_status"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "evidence@1"
+    },
+    "evidence_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "run_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "station_key": {
+      "type": "string",
+      "minLength": 1
+    },
+    "artifact_type": {
+      "enum": [
+        "command_transcript",
+        "structured_json",
+        "log",
+        "diff",
+        "screenshot",
+        "report"
+      ]
+    },
+    "path": {
+      "type": "string",
+      "minLength": 1
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "summary": {
+      "type": "string",
+      "minLength": 1
+    },
+    "redaction_status": {
+      "enum": [
+        "not_required",
+        "redacted",
+        "blocked"
+      ]
+    }
+  }
+}

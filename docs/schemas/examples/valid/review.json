@@ -1,0 +1,13 @@
+{
+  "schema_version": "review@1",
+  "review_id": "review-001",
+  "run_id": "run-20260616-0001",
+  "reviewer": "operator",
+  "verdict": "needs_changes",
+  "findings": [
+    {
+      "severity": "warning",
+      "message": "Evidence is sufficient for review but not for merge."
+    }
+  ]
+}

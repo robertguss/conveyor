@@ -1,0 +1,13 @@
+{
+  "schema_version": "run_bundle@1",
+  "bundle_id": "bundle-001",
+  "run_id": "run-20260616-0001",
+  "created_at": "2026-06-16T19:34:00Z",
+  "artifacts": [
+    {
+      "schema_version": "evidence@1",
+      "path": "runs/run-20260616-0001/baseline/evidence.json",
+      "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+    }
+  ]
+}

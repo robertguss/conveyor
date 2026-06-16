@@ -1,0 +1,9 @@
+{
+  "schema_version": "run_spec@1",
+  "run_id": "run-20260616-0001",
+  "plan_id": "plan-phase1-demo",
+  "created_at": "2026-06-16T19:33:00Z",
+  "stations": [
+    "readiness"
+  ]
+}

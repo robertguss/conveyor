@@ -1,0 +1,18 @@
+{
+  "schema_version": "gate@1",
+  "gate_id": "gate-final-001",
+  "run_id": "run-20260616-0001",
+  "gate_name": "final_report",
+  "decision": "blocked",
+  "checks": [
+    {
+      "name": "no_auto_merge",
+      "status": "pass"
+    },
+    {
+      "name": "human_review_required",
+      "status": "blocked",
+      "finding_ref": "review-001"
+    }
+  ]
+}
