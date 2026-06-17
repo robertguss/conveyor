@@ -35,7 +35,9 @@ defmodule Conveyor.ToolExecutorTest do
     assert payload["output_sha256"] == PayloadHelpers.sha256_binary("conveyor-ok\n")
     assert payload["artifact_refs"] == [payload["output_refs"]["combined"]]
     refute inspect(payload) =~ "secret-value"
-    assert result.tool_invocation_record.payload["tool_invocation_id"] == payload["tool_invocation_id"]
+
+    assert result.tool_invocation_record.payload["tool_invocation_id"] ==
+             payload["tool_invocation_id"]
 
     assert %{
              "type" => "process_exit",

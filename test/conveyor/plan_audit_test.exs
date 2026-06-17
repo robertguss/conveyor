@@ -5,6 +5,7 @@ defmodule Conveyor.PlanAuditTest do
 
   @source_path "plans/sample.conveyor.plan.json"
   @rerun_command ["mix", "conveyor.plan_audit", @source_path]
+  @vmr_ref "conveyor-quality-ci-evals-vmr.13"
 
   test "good sample plan reaches handoff_ready with structured audit-score JSON" do
     report = audit_plan(plan_contract("plan-audit-good"))
@@ -23,6 +24,28 @@ defmodule Conveyor.PlanAuditTest do
            } = report
 
     assert Enum.all?(report.dimensions, &(&1.status == "pass"))
+
+    assert [
+             %{
+               schema_version: "conveyor.human_decision@1",
+               category: "human_decision",
+               decision_id: "DEC-001",
+               decision_type: "architecture",
+               rationale: "Phase 1 demonstrates the tracer against a bounded local fixture.",
+               vmr_ref: @vmr_ref
+             },
+             %{
+               schema_version: "conveyor.human_decision@1",
+               category: "human_decision",
+               decision_id: "DEC-002",
+               decision_type: "scope_exclusion",
+               rationale:
+                 "Conveyor may prepare evidence and patches but does not merge or deploy.",
+               vmr_ref: @vmr_ref
+             }
+           ] = report.human_decision_records
+
+    assert report.human_approval_records == []
 
     assert %{
              schema_version: "conveyor.plan_traceability_matrix@1",
@@ -50,7 +73,8 @@ defmodule Conveyor.PlanAuditTest do
              verification_rows: [
                %{command_id: "VERIFY-001", acceptance_refs: ["AC-001", "AC-002"]},
                %{command_id: "VERIFY-002", acceptance_refs: ["AC-002"]}
-             ]
+             ],
+             contract_change_rows: []
            } = report.traceability_matrix
 
     json = report |> Jason.encode!() |> Jason.decode!()
@@ -86,6 +110,119 @@ defmodule Conveyor.PlanAuditTest do
     report = audit_plan(contract)
 
     assert_blocking_finding(report, "architecture_decisions", "missing_architecture_decisions")
+  end
+
+  test "contract-affecting changes require rationale, approval rationale, and artifact digests" do
+    contract =
+      plan_contract("plan-audit-missing-contract-change-rationale")
+      |> Map.put("contract_changes", [
+        %{
+          "change_id" => "CHANGE-001",
+          "change_type" => "acceptance_weakening",
+          "summary" => "Remove the visible list-response acceptance check.",
+          "rationale" => "",
+          "decision_refs" => ["DEC-002"],
+          "approval_refs" => ["APPROVAL-001"],
+          "artifact_digests" => []
+        }
+      ])
+      |> Map.put("human_approvals", [
+        %{
+          "approval_id" => "APPROVAL-001",
+          "approval_type" => "acceptance_weakening",
+          "actor" => "owner@example.com",
+          "target" => "CHANGE-001",
+          "reason" => "",
+          "artifact_digests" => []
+        }
+      ])
+
+    report = audit_plan(contract)
+
+    assert_blocking_finding(report, "architecture_decisions", "missing_contract_change_rationale")
+
+    assert_blocking_finding(
+      report,
+      "architecture_decisions",
+      "missing_contract_change_artifact_digest"
+    )
+
+    assert_blocking_finding(report, "architecture_decisions", "missing_approval_rationale")
+    assert_blocking_finding(report, "architecture_decisions", "missing_approval_artifact_digest")
+
+    assert Enum.any?(report.findings, fn finding ->
+             finding.finding_code == "missing_contract_change_rationale" and
+               finding.vmr_ref == @vmr_ref
+           end)
+
+    assert [
+             %{
+               change_id: "CHANGE-001",
+               change_type: "acceptance_weakening",
+               decision_refs: ["DEC-002"],
+               approval_refs: ["APPROVAL-001"],
+               artifact_digests: [],
+               approved: true,
+               vmr_ref: @vmr_ref
+             }
+           ] = report.traceability_matrix.contract_change_rows
+  end
+
+  test "approved contract changes emit structured HumanApproval records" do
+    digest = "sha256:contract-change-artifact"
+
+    contract =
+      plan_contract("plan-audit-approved-contract-change")
+      |> Map.put("contract_changes", [
+        %{
+          "change_id" => "CHANGE-001",
+          "change_type" => "external_integration",
+          "summary" => "Record a human-approved external integration contract.",
+          "rationale" => "The external integration boundary changes reviewed evidence.",
+          "decision_refs" => ["DEC-001"],
+          "approval_refs" => ["APPROVAL-001"],
+          "artifact_digests" => [digest]
+        }
+      ])
+      |> Map.put("human_approvals", [
+        %{
+          "approval_id" => "APPROVAL-001",
+          "approval_type" => "external_integration",
+          "actor" => "owner@example.com",
+          "target" => "CHANGE-001",
+          "reason" => "Reviewed the external integration contract and evidence digest.",
+          "artifact_digests" => [digest]
+        }
+      ])
+
+    report = audit_plan(contract)
+
+    assert report.status == "handoff_ready"
+    assert report.handoff_ready == true
+
+    assert [
+             %{
+               schema_version: "conveyor.human_approval@1",
+               category: "human_approval",
+               approval_id: "APPROVAL-001",
+               approval_type: "external_integration",
+               actor: "owner@example.com",
+               target: "CHANGE-001",
+               reason: "Reviewed the external integration contract and evidence digest.",
+               artifact_digests: [^digest],
+               evidence_refs: [^digest],
+               vmr_ref: @vmr_ref
+             }
+           ] = report.human_approval_records
+
+    assert [
+             %{
+               change_id: "CHANGE-001",
+               approved: true,
+               artifact_digests: [^digest],
+               vmr_ref: @vmr_ref
+             }
+           ] = report.traceability_matrix.contract_change_rows
   end
 
   test "broken requirement traceability produces a stable blocking finding" do
@@ -306,11 +443,13 @@ defmodule Conveyor.PlanAuditTest do
         %{
           "decision_id" => "DEC-001",
           "title" => "Keep implementation in the sample app",
+          "decision_type" => "architecture",
           "rationale" => "Phase 1 demonstrates the tracer against a bounded local fixture."
         },
         %{
           "decision_id" => "DEC-002",
           "title" => "Keep autonomy at L1",
+          "decision_type" => "scope_exclusion",
           "rationale" => "Conveyor may prepare evidence and patches but does not merge or deploy."
         }
       ],

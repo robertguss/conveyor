@@ -14,6 +14,9 @@ defmodule Conveyor.PlanAudit do
   @dimension_schema_version "conveyor.plan_audit.dimension_score@1"
   @next_action_schema_version "conveyor.plan_audit.next_action@1"
   @matrix_schema_version "conveyor.plan_traceability_matrix@1"
+  @human_decision_schema_version "conveyor.human_decision@1"
+  @human_approval_schema_version "conveyor.human_approval@1"
+  @vmr_ref "conveyor-quality-ci-evals-vmr.13"
   @cutline "TRACER_REQUIRED"
 
   @dimension_weights [
@@ -73,6 +76,8 @@ defmodule Conveyor.PlanAudit do
       normalized_contract_summary: Map.get(import_report, :normalized_contract_summary),
       plan_import_status: Map.get(import_report, :status),
       traceability_matrix: contract && traceability_matrix(contract),
+      human_decision_records: (contract && human_decision_records(contract, source_path)) || [],
+      human_approval_records: (contract && human_approval_records(contract, source_path)) || [],
       dimensions: dimensions,
       findings: findings,
       next_actions: next_actions(findings),
@@ -393,6 +398,9 @@ defmodule Conveyor.PlanAudit do
   defp dimension_findings("architecture_decisions", contract, source_path) do
     decisions = list_field(contract, "decisions")
     decision_ids = ids(decisions, "decision_id")
+    approvals = list_field(contract, "human_approvals")
+    approval_ids = ids(approvals, "approval_id")
+    contract_changes = list_field(contract, "contract_changes")
     slices = list_field(contract, "slices")
 
     decision_findings =
@@ -420,6 +428,104 @@ defmodule Conveyor.PlanAudit do
           "architecture decisions must include rationale",
           "Add rationale that explains why this decision constrains the plan.",
           source_path
+        )
+      end)
+
+    approval_findings =
+      approvals
+      |> Enum.with_index()
+      |> Enum.flat_map(fn {approval, index} ->
+        artifact_digests = list_field(approval, "artifact_digests")
+
+        []
+        |> maybe_vmr_finding(
+          blank?(Map.get(approval, "reason")),
+          "missing_approval_rationale",
+          "architecture_decisions",
+          "$.human_approvals[#{index}].reason",
+          "human approvals must include an explicit rationale",
+          "Add a reason explaining why this approval changes or accepts the contract.",
+          source_path
+        )
+        |> maybe_vmr_finding(
+          artifact_digests == [],
+          "missing_approval_artifact_digest",
+          "architecture_decisions",
+          "$.human_approvals[#{index}].artifact_digests",
+          "human approvals must reference artifact digests",
+          "Add the artifact digests that the approving human reviewed.",
+          source_path
+        )
+      end)
+
+    contract_change_findings =
+      contract_changes
+      |> Enum.with_index()
+      |> Enum.flat_map(fn {change, index} ->
+        decision_refs = list_field(change, "decision_refs")
+        approval_refs = list_field(change, "approval_refs")
+        artifact_digests = list_field(change, "artifact_digests")
+
+        []
+        |> maybe_vmr_finding(
+          blank?(Map.get(change, "rationale")),
+          "missing_contract_change_rationale",
+          "architecture_decisions",
+          "$.contract_changes[#{index}].rationale",
+          "contract-affecting changes must include a rationale",
+          "Record why this change is necessary before handoff.",
+          source_path
+        )
+        |> maybe_vmr_finding(
+          decision_refs == [],
+          "missing_contract_change_decision",
+          "architecture_decisions",
+          "$.contract_changes[#{index}].decision_refs",
+          "contract-affecting changes must reference a human decision",
+          "Add decision_refs that point to the decision authorizing this change.",
+          source_path
+        )
+        |> maybe_vmr_finding(
+          approval_refs == [],
+          "missing_contract_change_approval",
+          "architecture_decisions",
+          "$.contract_changes[#{index}].approval_refs",
+          "contract-affecting changes must reference a human approval",
+          "Add approval_refs that point to the approval authorizing this change.",
+          source_path
+        )
+        |> maybe_vmr_finding(
+          artifact_digests == [],
+          "missing_contract_change_artifact_digest",
+          "architecture_decisions",
+          "$.contract_changes[#{index}].artifact_digests",
+          "contract-affecting changes must bind reviewed artifacts by digest",
+          "Add artifact_digests for the contract artifacts that changed.",
+          source_path
+        )
+        |> Kernel.++(
+          unknown_ref_findings(
+            decision_refs,
+            decision_ids,
+            "unknown_contract_change_decision_ref",
+            "architecture_decisions",
+            "$.contract_changes[#{index}].decision_refs",
+            "contract change references a decision that is not declared",
+            "Declare the decision_id or update the contract change decision_refs entry.",
+            source_path
+          )
+        )
+        |> Kernel.++(
+          unknown_ref_findings(
+            approval_refs,
+            approval_ids,
+            "unknown_contract_change_approval_ref",
+            "architecture_decisions",
+            "$.contract_changes[#{index}].approval_refs",
+            "contract change references an approval that is not declared",
+            "Declare the approval_id or update the contract change approval_refs entry.",
+            source_path
+          )
         )
       end)
 
@@ -453,7 +559,10 @@ defmodule Conveyor.PlanAudit do
         )
       end)
 
-    decision_findings ++ incomplete_decision_findings ++ slice_findings
+    decision_findings ++
+      incomplete_decision_findings ++
+      approval_findings ++
+      contract_change_findings ++ slice_findings
   end
 
   defp dimension_findings("autonomy_readiness", contract, source_path) do
@@ -603,6 +712,8 @@ defmodule Conveyor.PlanAudit do
 
   defp traceability_matrix(contract) do
     requirements = list_field(contract, "requirements")
+    approvals = list_field(contract, "human_approvals")
+    approval_ids = ids(approvals, "approval_id")
     slices = list_field(contract, "slices")
     commands = list_field(contract, "verification_commands")
     acceptance_to_requirement = acceptance_to_requirement(requirements)
@@ -655,8 +766,72 @@ defmodule Conveyor.PlanAudit do
               |> Enum.reject(&blank?/1)
               |> stable_uniq()
           }
+        end),
+      contract_change_rows:
+        Enum.map(list_field(contract, "contract_changes"), fn change ->
+          approval_refs = list_field(change, "approval_refs")
+
+          %{
+            change_id: Map.get(change, "change_id"),
+            change_type: string_field(change, "change_type"),
+            decision_refs: list_field(change, "decision_refs"),
+            approval_refs: approval_refs,
+            artifact_digests: list_field(change, "artifact_digests"),
+            approved:
+              approval_refs != [] &&
+                Enum.all?(approval_refs, &MapSet.member?(approval_ids, &1)),
+            vmr_ref: @vmr_ref
+          }
         end)
     }
+  end
+
+  defp human_decision_records(contract, source_path) do
+    plan_id = string_field(contract, "plan_id")
+
+    contract
+    |> list_field("decisions")
+    |> Enum.map(fn decision ->
+      decision_type = string_field(decision, "decision_type")
+
+      %{
+        schema_version: @human_decision_schema_version,
+        category: "human_decision",
+        plan_id: plan_id,
+        decision_id: Map.get(decision, "decision_id"),
+        title: Map.get(decision, "title"),
+        decision_type: if(blank?(decision_type), do: "architecture", else: decision_type),
+        rationale: string_field(decision, "rationale"),
+        artifact_digests: list_field(decision, "artifact_digests"),
+        source_path: source_path,
+        vmr_ref: @vmr_ref
+      }
+    end)
+  end
+
+  defp human_approval_records(contract, source_path) do
+    plan_id = string_field(contract, "plan_id")
+
+    contract
+    |> list_field("human_approvals")
+    |> Enum.map(fn approval ->
+      artifact_digests = list_field(approval, "artifact_digests")
+
+      %{
+        schema_version: @human_approval_schema_version,
+        category: "human_approval",
+        plan_id: plan_id,
+        approval_id: Map.get(approval, "approval_id"),
+        approval_type: string_field(approval, "approval_type"),
+        actor: string_field(approval, "actor"),
+        target: string_field(approval, "target"),
+        reason: string_field(approval, "reason"),
+        artifact_digests: artifact_digests,
+        evidence_refs: artifact_digests,
+        source_path: source_path,
+        vmr_ref: @vmr_ref
+      }
+    end)
   end
 
   defp unverified_acceptance_findings(
@@ -694,6 +869,23 @@ defmodule Conveyor.PlanAudit do
 
   defp maybe_finding(findings, true, code, dimension, path, message, action, source_path),
     do: findings ++ [finding(code, dimension, path, message, action, source_path)]
+
+  defp maybe_vmr_finding(
+         findings,
+         false,
+         _code,
+         _dimension,
+         _path,
+         _message,
+         _action,
+         _source_path
+       ),
+       do: findings
+
+  defp maybe_vmr_finding(findings, true, code, dimension, path, message, action, source_path),
+    do:
+      findings ++
+        [finding(code, dimension, path, message, action, source_path, %{vmr_ref: @vmr_ref})]
 
   defp finding(code, dimension, path, message, action, source_path, extra \\ %{}) do
     %{

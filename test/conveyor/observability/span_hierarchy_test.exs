@@ -2,6 +2,7 @@ defmodule Conveyor.Observability.SpanHierarchyTest do
   use ExUnit.Case, async: true
 
   alias Conveyor.Observability.SpanHierarchy
+  alias ConveyorWeb.Telemetry
 
   @trace_id "4bf92f3577b34da6a3ce929d0e0e4736"
   @run_span_id "00f067aa0ba902b7"
@@ -126,9 +127,90 @@ defmodule Conveyor.Observability.SpanHierarchyTest do
     assert has_finding?(findings, "adapter_events", "missing_traceparent")
   end
 
+  test "defines bounded Conveyor metrics without high-cardinality labels" do
+    specs = Telemetry.conveyor_metric_specs()
+
+    assert Enum.map(specs, & &1.key) == [
+             :station_duration,
+             :station_status,
+             :policy_decision,
+             :adapter_outcome,
+             :gate_stage,
+             :canary_false_negative,
+             :budget_counter
+           ]
+
+    assert %{
+             schema_version: "conveyor.metric_cardinality_report@1",
+             category: "metric_cardinality",
+             status: "ok",
+             metric_count: 7,
+             finding_count: 0,
+             findings: []
+           } = Telemetry.conveyor_metric_cardinality_report()
+
+    allowed = MapSet.new(Telemetry.allowed_conveyor_metric_tags())
+    forbidden = MapSet.new(Telemetry.forbidden_conveyor_metric_labels())
+
+    for spec <- specs do
+      assert MapSet.subset?(MapSet.new(spec.tags), allowed)
+      assert MapSet.disjoint?(MapSet.new(spec.tags), forbidden)
+      assert MapSet.disjoint?(MapSet.new(spec.metadata_keys), forbidden)
+    end
+
+    conveyor_metrics =
+      Telemetry.metrics()
+      |> Enum.map(&metric_name/1)
+      |> Enum.filter(&String.starts_with?(&1, "conveyor."))
+
+    assert "conveyor.station.duration" in conveyor_metrics
+    assert "conveyor.policy.decision.count" in conveyor_metrics
+    assert "conveyor.adapter.outcome.count" in conveyor_metrics
+    assert "conveyor.gate.stage.count" in conveyor_metrics
+    assert "conveyor.canary.false_negative.count" in conveyor_metrics
+    assert "conveyor.budget.counter.value" in conveyor_metrics
+  end
+
+  test "metric cardinality report rejects commands paths prompts errors and summaries" do
+    report =
+      Telemetry.conveyor_metric_cardinality_report([
+        %{
+          key: :bad_metric,
+          name: "conveyor.bad.metric",
+          type: :counter,
+          tags: [:project_id, :raw_command, :file_path],
+          metadata_keys: [:status, :prompt, :error_message, :model_summary]
+        }
+      ])
+
+    assert %{
+             status: "failed",
+             finding_count: 5,
+             findings: findings
+           } = report
+
+    assert metric_finding?(findings, "tag", "raw_command", "forbidden_metric_label")
+    assert metric_finding?(findings, "tag", "file_path", "forbidden_metric_label")
+    assert metric_finding?(findings, "metadata_key", "prompt", "forbidden_metric_label")
+    assert metric_finding?(findings, "metadata_key", "error_message", "forbidden_metric_label")
+    assert metric_finding?(findings, "metadata_key", "model_summary", "forbidden_metric_label")
+  end
+
   defp has_finding?(findings, record_set, finding_code) do
     Enum.any?(findings, fn finding ->
       match?(%{record_set: ^record_set, finding_code: ^finding_code}, finding)
+    end)
+  end
+
+  defp metric_name(%{name: name}) when is_binary(name), do: name
+  defp metric_name(%{name: name}) when is_list(name), do: Enum.join(name, ".")
+
+  defp metric_finding?(findings, source, label, finding_code) do
+    Enum.any?(findings, fn finding ->
+      match?(
+        %{source: ^source, label: ^label, finding_code: ^finding_code},
+        finding
+      )
     end)
   end
 end
