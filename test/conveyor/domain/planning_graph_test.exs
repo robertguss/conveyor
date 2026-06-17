@@ -2,6 +2,13 @@ defmodule Conveyor.Domain.PlanningGraphTest do
   use ExUnit.Case, async: false
 
   alias Conveyor.Domain.PlanningGraph
+  alias Conveyor.Repo
+
+  setup do
+    :ok = Ecto.Adapters.SQL.Sandbox.checkout(Repo)
+    Ecto.Adapters.SQL.Sandbox.mode(Repo, {:shared, self()})
+    :ok
+  end
 
   test "creates the complete planning graph from a sample plan" do
     result = PlanningGraph.create!(sample_plan())

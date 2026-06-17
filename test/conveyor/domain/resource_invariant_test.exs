@@ -4,6 +4,12 @@ defmodule Conveyor.Domain.ResourceInvariantTest do
   alias Conveyor.Domain.ResourceInvariants
   alias Conveyor.Repo
 
+  setup do
+    :ok = Ecto.Adapters.SQL.Sandbox.checkout(Repo)
+    Ecto.Adapters.SQL.Sandbox.mode(Repo, {:shared, self()})
+    :ok
+  end
+
   test "declares the database-backed resource invariant contract" do
     constraints = ResourceInvariants.unique_identity_constraints()
 
