@@ -128,8 +128,10 @@ defmodule Mix.Tasks.Conveyor.Report do
 
         mix conveyor.report --json
         mix conveyor.report --output tmp/conveyor_operator/report.json
+        mix conveyor.report --artifact-manifest tmp/conveyor_operator/artifacts.json --root .
 
-    This skeleton is deterministic and never contacts live providers.
+    This command is deterministic, verifies stored artifact digests before
+    projection, and never contacts live providers.
     """
 end
 
