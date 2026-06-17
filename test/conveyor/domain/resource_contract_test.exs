@@ -502,6 +502,104 @@ defmodule Conveyor.Domain.ResourceContractTest do
     assert old_input_digests == lock["input_digests"]
   end
 
+  test "TestPack preserves locked test identities and rejects repository test edits" do
+    attrs = test_pack_attrs()
+    pack = Conveyor.Domain.TestPack.build!(attrs)
+
+    reordered =
+      Conveyor.Domain.TestPack.build!(
+        test_pack_attrs(%{
+          required_test_refs: Enum.reverse(attrs.required_test_refs),
+          acceptance_criteria_refs: Enum.reverse(attrs.acceptance_criteria_refs),
+          runner_command_specs: Enum.reverse(attrs.runner_command_specs)
+        })
+      )
+
+    assert pack["schema_version"] == "test_pack@1"
+    assert pack["test_pack_digest"] == reordered["test_pack_digest"]
+    assert pack["test_pack_digest"] =~ ~r/^sha256:[a-f0-9]{64}$/
+    assert pack["mount_mode"] == "read_only"
+    assert pack["read_only"] == true
+
+    assert {:ok, record} =
+             Ash.create(
+               Conveyor.Domain.TestPack,
+               Conveyor.Domain.TestPack.create_attrs!(attrs),
+               action: :create
+             )
+
+    assert record.external_id == "fastapi-tasks-contract@1"
+    assert record.payload["test_pack_digest"] == pack["test_pack_digest"]
+
+    assert %{
+             schema_version: "conveyor.test_pack_mount@1",
+             category: "test_pack_mount",
+             mount_path: ".conveyor/test_packs/fastapi-tasks-contract/v1",
+             mount_mode: "read_only",
+             read_only: true,
+             writable: false
+           } = Conveyor.Domain.TestPack.mount_spec(record)
+
+    assert %{
+             schema_version: "conveyor.test_pack_identity_summary@1",
+             category: "test_pack_identity",
+             matrix_ref: "conveyor-quality-ci-evals-vmr.13",
+             test_pack_key: "fastapi-tasks-contract",
+             version: 1,
+             test_pack_digest: test_pack_digest,
+             content_digest: "sha256:test-pack-content-v1",
+             required_test_count: 2,
+             acceptance_criteria_count: 2,
+             runner_command_count: 1,
+             read_only: true,
+             required_test_refs: required_test_refs
+           } = Conveyor.Domain.TestPack.summary(record)
+
+    assert test_pack_digest == pack["test_pack_digest"]
+
+    assert Enum.map(required_test_refs, & &1["test_id"]) == [
+             "test-complete-task",
+             "test-list-state"
+           ]
+
+    assert {:ok, %{test_pack_digest: ^test_pack_digest}} =
+             Conveyor.Domain.TestPack.validate_locked_identity(record, attrs)
+
+    changed_attrs =
+      test_pack_attrs(%{
+        content_digest: "sha256:test-pack-content-v2",
+        required_test_refs: [
+          %{
+            test_id: "test-complete-task",
+            path: "tests/test_complete_task.py",
+            sha256: "sha256:test-complete-v2"
+          },
+          %{
+            test_id: "test-list-state",
+            path: "tests/test_list_tasks.py",
+            sha256: "sha256:test-list-v1"
+          }
+        ]
+      })
+
+    assert {:error,
+            %{
+              schema_version: "conveyor.test_pack_identity_finding@1",
+              category: "test_pack_identity_mismatch",
+              finding_code: "locked_test_pack_mismatch",
+              severity: "blocking",
+              matrix_ref: "conveyor-quality-ci-evals-vmr.13",
+              locked_test_pack_digest: ^test_pack_digest,
+              observed_test_pack_digest: observed_digest,
+              changed_inputs: changed_inputs,
+              action: "use_locked_read_only_test_pack_for_acceptance_evidence"
+            }} = Conveyor.Domain.TestPack.validate_locked_identity(record, changed_attrs)
+
+    refute observed_digest == test_pack_digest
+    assert changed_inputs == ["content_digest", "required_test_refs"]
+    assert Conveyor.Domain.TestPack.summary(record).test_pack_digest == test_pack_digest
+  end
+
   test "RunAttempt state machine guards autonomy, artifacts, review, gate, and reports" do
     assert {:ok, attempt} =
              Ash.create(
@@ -1312,6 +1410,47 @@ defmodule Conveyor.Domain.ResourceContractTest do
     digest_set()
     |> Enum.reverse()
     |> Map.new()
+  end
+
+  defp test_pack_attrs(overrides \\ %{}) do
+    %{
+      test_pack_key: "fastapi-tasks-contract",
+      version: 1,
+      source_ref: "git:sample_apps/fastapi_tasks@abc1234",
+      content_digest: "sha256:test-pack-content-v1",
+      required_test_refs: [
+        %{
+          test_id: "test-complete-task",
+          path: "tests/test_complete_task.py",
+          sha256: "sha256:test-complete-v1"
+        },
+        %{
+          test_id: "test-list-state",
+          path: "tests/test_list_tasks.py",
+          sha256: "sha256:test-list-v1"
+        }
+      ],
+      acceptance_criteria_refs: ["AC-001", "AC-002"],
+      mount_path: ".conveyor/test_packs/fastapi-tasks-contract/v1",
+      runner_command_specs: [
+        %{
+          command_id: "VERIFY-001",
+          acceptance_refs: ["AC-001", "AC-002"],
+          command: ["python3", "-m", "pytest", "/mnt/test_pack/tests"]
+        }
+      ],
+      result_adapter: %{
+        adapter: "pytest-json",
+        schema_version: "pytest_result_adapter@1"
+      },
+      lock_metadata: %{
+        contract_lock_id: "lock-agent-brief-001",
+        locked_by: "owner@example.com",
+        locked_at: "2026-06-17T00:00:00Z",
+        reason: "Locked acceptance evidence for bounded tracer execution"
+      }
+    }
+    |> Map.merge(overrides)
   end
 
   defp contract_lock_attrs(overrides \\ %{}) do

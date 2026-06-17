@@ -1661,6 +1661,237 @@ end
 
 defmodule Conveyor.Domain.TestPack do
   use Conveyor.Domain.ActiveResource, table: "test_packs"
+
+  @schema_version "test_pack@1"
+  @summary_schema_version "conveyor.test_pack_identity_summary@1"
+  @finding_schema_version "conveyor.test_pack_identity_finding@1"
+  @matrix_ref "conveyor-quality-ci-evals-vmr.13"
+
+  def schema_version, do: @schema_version
+
+  def build!(attrs) when is_map(attrs) do
+    test_pack_key = required_string!(attrs, :test_pack_key, fallback: :pack_key)
+    version = Conveyor.Domain.PayloadHelpers.fetch_required!(attrs, :version)
+    required_test_refs = sorted_required_list!(attrs, :required_test_refs, &test_ref_sort_key/1)
+
+    acceptance_criteria_refs =
+      sorted_required_list!(attrs, :acceptance_criteria_refs, &stable_sort_key/1)
+
+    runner_command_specs =
+      sorted_required_list!(attrs, :runner_command_specs, &command_sort_key/1)
+
+    unsigned = %{
+      "schema_version" => @schema_version,
+      "test_pack_key" => test_pack_key,
+      "version" => version,
+      "source_ref" => required_string!(attrs, :source_ref),
+      "content_digest" => required_string!(attrs, :content_digest),
+      "required_test_refs" => required_test_refs,
+      "acceptance_criteria_refs" => acceptance_criteria_refs,
+      "mount_path" => required_string!(attrs, :mount_path),
+      "mount_mode" => "read_only",
+      "read_only" => true,
+      "runner_command_specs" => runner_command_specs,
+      "result_adapter" => required_payload!(attrs, :result_adapter),
+      "lock_metadata" => required_payload!(attrs, :lock_metadata)
+    }
+
+    Map.put(unsigned, "test_pack_digest", test_pack_digest(unsigned))
+  end
+
+  def create_attrs!(attrs) when is_map(attrs) do
+    payload = build!(attrs)
+
+    %{
+      external_id: "#{payload["test_pack_key"]}@#{payload["version"]}",
+      name: payload["test_pack_key"],
+      status: "active",
+      payload: payload
+    }
+  end
+
+  def summary(pack_or_payload) when is_map(pack_or_payload) do
+    payload = payload(pack_or_payload)
+
+    %{
+      schema_version: @summary_schema_version,
+      category: "test_pack_identity",
+      matrix_ref: @matrix_ref,
+      test_pack_key: payload["test_pack_key"],
+      version: payload["version"],
+      test_pack_digest: payload["test_pack_digest"],
+      content_digest: payload["content_digest"],
+      source_ref: payload["source_ref"],
+      mount_path: payload["mount_path"],
+      mount_mode: payload["mount_mode"],
+      read_only: payload["read_only"],
+      required_test_refs: payload["required_test_refs"],
+      acceptance_criteria_refs: payload["acceptance_criteria_refs"],
+      required_test_count: length(payload["required_test_refs"]),
+      acceptance_criteria_count: length(payload["acceptance_criteria_refs"]),
+      runner_command_count: length(payload["runner_command_specs"]),
+      result_adapter: payload["result_adapter"]
+    }
+  end
+
+  def mount_spec(pack_or_payload) when is_map(pack_or_payload) do
+    payload = payload(pack_or_payload)
+
+    %{
+      schema_version: "conveyor.test_pack_mount@1",
+      category: "test_pack_mount",
+      test_pack_key: payload["test_pack_key"],
+      version: payload["version"],
+      test_pack_digest: payload["test_pack_digest"],
+      source_ref: payload["source_ref"],
+      mount_path: payload["mount_path"],
+      mount_mode: "read_only",
+      read_only: true,
+      writable: false
+    }
+  end
+
+  def validate_locked_identity(pack_or_payload, attrs)
+      when is_map(pack_or_payload) and is_map(attrs) do
+    locked = payload(pack_or_payload)
+    observed = build!(Map.put_new(attrs, :test_pack_key, locked["test_pack_key"]))
+
+    if observed["test_pack_digest"] == locked["test_pack_digest"] do
+      {:ok, summary(locked)}
+    else
+      {:error, identity_mismatch_finding(locked, observed)}
+    end
+  end
+
+  def identity_mismatch_finding(locked, observed) when is_map(locked) and is_map(observed) do
+    locked = payload(locked)
+    observed = payload(observed)
+
+    %{
+      schema_version: @finding_schema_version,
+      category: "test_pack_identity_mismatch",
+      finding_code: "locked_test_pack_mismatch",
+      severity: "blocking",
+      matrix_ref: @matrix_ref,
+      test_pack_key: locked["test_pack_key"],
+      version: locked["version"],
+      locked_test_pack_digest: locked["test_pack_digest"],
+      observed_test_pack_digest: observed["test_pack_digest"],
+      changed_inputs: changed_inputs(locked, observed),
+      action: "use_locked_read_only_test_pack_for_acceptance_evidence",
+      message:
+        "Repository test edits cannot replace the locked TestPack used for acceptance evidence."
+    }
+  end
+
+  defp test_pack_digest(unsigned) do
+    unsigned
+    |> Map.take([
+      "schema_version",
+      "test_pack_key",
+      "version",
+      "source_ref",
+      "content_digest",
+      "required_test_refs",
+      "acceptance_criteria_refs",
+      "mount_path",
+      "runner_command_specs",
+      "result_adapter",
+      "lock_metadata"
+    ])
+    |> Conveyor.Domain.PayloadHelpers.canonical_sha256()
+  end
+
+  defp changed_inputs(locked, observed) do
+    [
+      "source_ref",
+      "content_digest",
+      "required_test_refs",
+      "acceptance_criteria_refs",
+      "mount_path",
+      "runner_command_specs",
+      "result_adapter",
+      "lock_metadata"
+    ]
+    |> Enum.filter(fn key -> Map.get(locked, key) != Map.get(observed, key) end)
+  end
+
+  defp payload(%{payload: payload}) when is_map(payload),
+    do: Conveyor.Domain.PayloadHelpers.normalize_map(payload)
+
+  defp payload(payload) when is_map(payload),
+    do: Conveyor.Domain.PayloadHelpers.normalize_map(payload)
+
+  defp required_payload!(attrs, key) do
+    attrs
+    |> Conveyor.Domain.PayloadHelpers.fetch_required!(key)
+    |> case do
+      value when value in [nil, "", [], %{}] ->
+        raise ArgumentError, "missing required TestPack input: #{key}"
+
+      value ->
+        Conveyor.Domain.PayloadHelpers.normalize_payload(value)
+    end
+  end
+
+  defp sorted_required_list!(attrs, key, sort_key) do
+    value = Conveyor.Domain.PayloadHelpers.fetch_required!(attrs, key)
+
+    case value do
+      values when is_list(values) and values != [] ->
+        normalized =
+          values
+          |> Conveyor.Domain.PayloadHelpers.normalize_list()
+          |> Enum.reject(&blank?/1)
+          |> Enum.sort_by(sort_key)
+
+        if normalized == [] do
+          raise ArgumentError, "TestPack input #{key} must be a non-empty list"
+        end
+
+        normalized
+
+      _other ->
+        raise ArgumentError, "TestPack input #{key} must be a non-empty list"
+    end
+  end
+
+  defp test_ref_sort_key(test_ref) when is_map(test_ref) do
+    Map.get(test_ref, "test_id") || Map.get(test_ref, "id") || stable_sort_key(test_ref)
+  end
+
+  defp test_ref_sort_key(test_ref), do: stable_sort_key(test_ref)
+
+  defp command_sort_key(command) when is_map(command) do
+    Map.get(command, "command_id") || stable_sort_key(command)
+  end
+
+  defp command_sort_key(command), do: stable_sort_key(command)
+
+  defp stable_sort_key(value), do: Conveyor.Domain.PayloadHelpers.canonical_sha256(value)
+
+  defp required_string!(attrs, key, opts \\ []) do
+    value = Conveyor.Domain.PayloadHelpers.get(attrs, key)
+
+    value =
+      if value == nil and Keyword.has_key?(opts, :fallback) do
+        Conveyor.Domain.PayloadHelpers.get(attrs, Keyword.fetch!(opts, :fallback))
+      else
+        value
+      end
+
+    case value do
+      value when is_binary(value) and value != "" -> value
+      value when value not in [nil, ""] -> to_string(value)
+      _other -> raise ArgumentError, "missing required TestPack field: #{key}"
+    end
+  end
+
+  defp blank?(value) when is_binary(value), do: String.trim(value) == ""
+  defp blank?(value) when is_list(value), do: value == []
+  defp blank?(value) when is_map(value), do: map_size(value) == 0
+  defp blank?(nil), do: true
+  defp blank?(_value), do: false
 end
 
 defmodule Conveyor.Domain.VerificationSuite do
