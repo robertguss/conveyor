@@ -47,7 +47,7 @@ defmodule Conveyor.Artifacts.Projector.LocalDisk do
     %{
       id: "openai_api_key",
       label: "OpenAI API key",
-      regex: ~r/sk-[A-Za-z0-9_-]{16,}/,
+      regex: ~r/(?<![A-Za-z0-9])sk-[A-Za-z0-9_-]{16,}/,
       replacement: "[REDACTED:openai_api_key]"
     },
     %{
@@ -89,6 +89,7 @@ defmodule Conveyor.Artifacts.Projector.LocalDisk do
     artifact_key = fetch_required!(attrs, :artifact_key)
     artifact_role = fetch_required!(attrs, :artifact_role)
     projection_path = fetch_required!(attrs, :projection_path)
+    projection_schema_version = fetch_schema_version(attrs, artifact_role)
     secret_findings = secret_findings(bytes, artifact_key, artifact_role, projection_path)
     sensitivity = classify_sensitivity(attrs, secret_findings)
     quarantined = sensitive?(sensitivity)
@@ -106,6 +107,7 @@ defmodule Conveyor.Artifacts.Projector.LocalDisk do
 
     artifact = %{
       schema_version: "conveyor.stored_artifact@1",
+      projection_schema_version: projection_schema_version,
       artifact_role: artifact_role,
       artifact_key: artifact_key,
       projection_path: projection_path,
@@ -147,9 +149,13 @@ defmodule Conveyor.Artifacts.Projector.LocalDisk do
     policy = Map.get(attrs, :policy, Map.get(attrs, "policy", %{}))
 
     with {:ok, verified_artifacts} <- verify_artifacts(artifacts),
-         :ok <- enforce_secret_policy(verified_artifacts, policy),
+         {:ok, generated_artifacts, human_report_generation} <-
+           maybe_generate_human_reports(backend, run_id, bundle_id, verified_artifacts),
+         {:ok, verified_generated_artifacts} <- verify_artifacts(generated_artifacts),
+         all_verified_artifacts = verified_artifacts ++ verified_generated_artifacts,
+         :ok <- enforce_secret_policy(all_verified_artifacts, policy),
          {:ok, projected_entries, projection_ledger} <-
-           write_projected_artifacts(backend, run_id, verified_artifacts),
+           write_projected_artifacts(backend, run_id, all_verified_artifacts),
          {:ok, manifest, manifest_path, manifest_sha256} <-
            write_manifest(backend, run_id, bundle_id, created_at, projected_entries),
          {:ok, run_bundle, run_bundle_path} <-
@@ -168,14 +174,15 @@ defmodule Conveyor.Artifacts.Projector.LocalDisk do
          run_id: run_id,
          bundle_id: bundle_id,
          bundle_root_sha256: run_bundle["bundle_root_sha256"],
+         human_report_generation: human_report_generation,
          manifest: manifest,
          run_bundle: run_bundle,
-         redaction_report: projection_redaction_report(verified_artifacts),
+         redaction_report: projection_redaction_report(all_verified_artifacts),
          manifest_path: manifest_path,
          run_bundle_path: run_bundle_path,
          artifacts: projected_entries,
          ledger:
-           Enum.flat_map(verified_artifacts, & &1.ledger) ++
+           Enum.flat_map(all_verified_artifacts, & &1.ledger) ++
              projection_ledger ++
              [
                ledger_event("run_bundle_projected", %{
@@ -188,6 +195,82 @@ defmodule Conveyor.Artifacts.Projector.LocalDisk do
              ]
        }}
     end
+  end
+
+  defp maybe_generate_human_reports(backend, run_id, bundle_id, verified_artifacts) do
+    case report_evidence_payload(verified_artifacts) do
+      nil ->
+        {:ok, [], nil}
+
+      evidence ->
+        with {:ok, report} <-
+               Conveyor.Artifacts.Dossier.render(evidence, run_id: run_id, bundle_id: bundle_id),
+             {:ok, dossier_artifact} <-
+               put_human_report_artifact(
+                 backend,
+                 evidence,
+                 "dossier",
+                 "dossier.md",
+                 report.dossier_md
+               ),
+             {:ok, pr_body_artifact} <-
+               put_human_report_artifact(
+                 backend,
+                 evidence,
+                 "pr_body",
+                 "pr_body.md",
+                 report.pr_body_md
+               ) do
+          generated_artifacts = [dossier_artifact, pr_body_artifact]
+
+          summary =
+            Map.put(
+              report.summary,
+              :generated_artifacts,
+              Enum.map(generated_artifacts, &human_report_artifact_summary/1)
+            )
+
+          {:ok, generated_artifacts, summary}
+        end
+    end
+  end
+
+  defp report_evidence_payload(verified_artifacts) do
+    Enum.find_value(verified_artifacts, fn artifact ->
+      if artifact.artifact_role == "evidence" do
+        case Jason.decode(artifact.bytes) do
+          {:ok, %{"schema_version" => "evidence@1"} = evidence} -> evidence
+          _ -> nil
+        end
+      end
+    end)
+  end
+
+  defp put_human_report_artifact(backend, evidence, role, filename, bytes) do
+    put_artifact(backend, %{
+      artifact_key: human_report_artifact_key(evidence, role),
+      artifact_role: role,
+      projection_path: Path.join("reports", filename),
+      schema_version: "#{role}@1",
+      content_type: "text/markdown",
+      bytes: bytes
+    })
+  end
+
+  defp human_report_artifact_key(evidence, role) do
+    evidence
+    |> Map.get("evidence_id", Map.get(evidence, "run_id", "evidence"))
+    |> then(&"#{&1}-#{role}")
+    |> String.replace(~r/[^A-Za-z0-9_.-]/, "-")
+  end
+
+  defp human_report_artifact_summary(artifact) do
+    %{
+      artifact_role: artifact.artifact_role,
+      artifact_key: artifact.artifact_key,
+      projection_path: artifact.projection_path,
+      sha256: artifact.sha256
+    }
   end
 
   def digest_mismatch_finding(artifact, actual_sha256) do
@@ -568,13 +651,36 @@ defmodule Conveyor.Artifacts.Projector.LocalDisk do
     {:ok, unsigned, path}
   end
 
-  defp artifact_schema_version(%{schema_version: schema_version})
+  defp artifact_schema_version(%{projection_schema_version: schema_version})
        when is_binary(schema_version) do
+    schema_version
+  end
+
+  defp artifact_schema_version(%{"projection_schema_version" => schema_version})
+       when is_binary(schema_version) do
+    schema_version
+  end
+
+  defp artifact_schema_version(%{schema_version: schema_version})
+       when is_binary(schema_version) and schema_version != "conveyor.stored_artifact@1" do
+    schema_version
+  end
+
+  defp artifact_schema_version(%{"schema_version" => schema_version})
+       when is_binary(schema_version) and schema_version != "conveyor.stored_artifact@1" do
     schema_version
   end
 
   defp artifact_schema_version(%{artifact_role: artifact_role}) do
     "#{artifact_role}@1"
+  end
+
+  defp artifact_schema_version(%{"artifact_role" => artifact_role}) do
+    "#{artifact_role}@1"
+  end
+
+  defp fetch_schema_version(attrs, artifact_role) do
+    Map.get(attrs, :schema_version) || Map.get(attrs, "schema_version") || "#{artifact_role}@1"
   end
 
   defp artifact_schema_versions(entries) do

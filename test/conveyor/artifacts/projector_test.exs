@@ -3,6 +3,7 @@ defmodule Conveyor.Artifacts.ProjectorTest do
 
   alias Conveyor.Artifacts.Projector
   alias Conveyor.Artifacts.Projector.LocalDisk
+  alias Conveyor.EvidenceRecorder
 
   test "stores bytes by sha256 before projecting human-friendly files" do
     backend = LocalDisk.new(root: tmp_root("happy-path"))
@@ -144,6 +145,139 @@ defmodule Conveyor.Artifacts.ProjectorTest do
     refute canonical_artifacts_json =~ second_backend.root
     refute canonical_artifacts_json =~ "blob_path"
     refute canonical_artifacts_json =~ "created_at"
+  end
+
+  test "generates dossier and pr body from recorded evidence" do
+    backend = LocalDisk.new(root: tmp_root("human-reports"))
+
+    assert {:ok, evidence} = EvidenceRecorder.build(evidence_attrs())
+    evidence_artifact = store_evidence_artifact(backend, evidence)
+
+    assert {:ok, projection} =
+             LocalDisk.project_run(backend, %{
+               run_id: evidence["run_id"],
+               bundle_id: "bundle-human-report",
+               created_at: ~U[2026-06-17 01:00:00Z],
+               artifacts: [evidence_artifact]
+             })
+
+    dossier_path =
+      Path.join([backend.root, ".conveyor", "runs", evidence["run_id"], "reports", "dossier.md"])
+
+    pr_body_path =
+      Path.join([backend.root, ".conveyor", "runs", evidence["run_id"], "reports", "pr_body.md"])
+
+    assert File.exists?(dossier_path)
+    assert File.exists?(pr_body_path)
+
+    dossier = File.read!(dossier_path)
+    pr_body = File.read!(pr_body_path)
+
+    for heading <- [
+          "## Task Context",
+          "## Requirement Traceability",
+          "## Summary",
+          "## Diff",
+          "## AC-to-Evidence Mapping",
+          "## Conductor Commands",
+          "## Quality Delta",
+          "## Reviewer Verdict",
+          "## Gate Result",
+          "## Policy and Safety",
+          "## Known Risks",
+          "## Bundle Digests"
+        ] do
+      assert dossier =~ heading
+    end
+
+    assert dossier =~ "AC-1: Evidence comes from conductor verification."
+    assert dossier =~ "artifact://conductor/mix-test.log"
+    assert dossier =~ "Run bundle: .conveyor/runs/#{evidence["run_id"]}/run_bundle.json"
+
+    assert pr_body =~ "## Task"
+    assert pr_body =~ "## Acceptance Criteria"
+    assert pr_body =~ "- [x] AC-1"
+    assert pr_body =~ "Conductor verification reproduced the implementation claims."
+    assert pr_body =~ "## Verification"
+    assert pr_body =~ "mix format --check-formatted"
+    assert pr_body =~ "artifact://conductor/mix-test.log"
+    assert pr_body =~ "## Risk"
+    assert pr_body =~ "risk-report-circular-digest"
+    assert pr_body =~ "## Agent/Profile"
+    assert pr_body =~ "codex"
+    assert pr_body =~ "agent-session-001"
+    assert pr_body =~ "agent-profile-implementer"
+    assert pr_body =~ "## Evidence Digests"
+    assert pr_body =~ evidence["sha256"]
+
+    assert %{
+             schema_version: "conveyor.human_report_generation_summary@1",
+             category: "human_report_generation",
+             matrix_ref: "conveyor-quality-ci-evals-vmr.13",
+             generated_artifacts: generated_artifacts,
+             finding_count: 0
+           } = projection.human_report_generation
+
+    assert Enum.map(generated_artifacts, & &1.artifact_role) == ["dossier", "pr_body"]
+
+    assert Enum.map(generated_artifacts, & &1.sha256)
+           |> Enum.all?(&(&1 =~ ~r/^sha256:[a-f0-9]{64}$/))
+
+    artifacts_by_role =
+      projection.manifest["artifacts"]
+      |> Map.new(&{&1["artifact_role"], &1})
+
+    assert Map.keys(artifacts_by_role) |> Enum.sort() == ["dossier", "evidence", "pr_body"]
+    assert artifacts_by_role["dossier"]["schema_version"] == "dossier@1"
+    assert artifacts_by_role["pr_body"]["schema_version"] == "pr_body@1"
+    assert projection.run_bundle["artifact_schema_versions"]["dossier"] == "dossier@1"
+    assert projection.run_bundle["artifact_schema_versions"]["pr_body"] == "pr_body@1"
+    assert projection.bundle_root_sha256 =~ ~r/^sha256:[a-f0-9]{64}$/
+  end
+
+  test "blocks dossier generation when recorded evidence is missing required sections" do
+    backend = LocalDisk.new(root: tmp_root("human-report-missing-section"))
+
+    incomplete_evidence = %{
+      "schema_version" => "evidence@1",
+      "evidence_id" => "evidence-incomplete",
+      "run_id" => "run-incomplete",
+      "slice_id" => "slice-incomplete",
+      "summary" => "Evidence exists but omits independent verification mappings.",
+      "sha256" => "sha256-placeholder"
+    }
+
+    artifact = store_evidence_artifact(backend, incomplete_evidence)
+
+    assert {:error,
+            %{
+              schema_version: "conveyor.human_report_generation_finding@1",
+              category: "human_report_missing_section",
+              failure_category: "missing_human_report_section",
+              severity: "error",
+              missing_sections: missing_sections,
+              action: "block_report_projection"
+            }} =
+             LocalDisk.project_run(backend, %{
+               run_id: "run-incomplete",
+               bundle_id: "bundle-incomplete",
+               artifacts: [artifact]
+             })
+
+    assert "requirement_traceability" in missing_sections
+    assert "acceptance_mapping" in missing_sections
+    assert "conductor_commands" in missing_sections
+
+    refute File.exists?(
+             Path.join([
+               backend.root,
+               ".conveyor",
+               "runs",
+               "run-incomplete",
+               "reports",
+               "dossier.md"
+             ])
+           )
   end
 
   test "blocks projection when stored blob bytes do not match recorded digest" do
@@ -312,6 +446,82 @@ defmodule Conveyor.Artifacts.ProjectorTest do
              })
 
     artifact
+  end
+
+  defp store_evidence_artifact(backend, evidence) do
+    assert {:ok, artifact} =
+             LocalDisk.put_artifact(backend, %{
+               artifact_key: evidence["evidence_id"],
+               artifact_role: "evidence",
+               projection_path: "evidence/evidence.json",
+               schema_version: "evidence@1",
+               content_type: "application/json",
+               bytes: Jason.encode!(evidence)
+             })
+
+    artifact
+  end
+
+  defp evidence_attrs do
+    %{
+      evidence_id: "evidence-run-001",
+      run_id: "run-20260617-0001",
+      slice_id: "slice-auth-001",
+      station_key: "record_evidence",
+      summary: "Conductor verification reproduced the implementation claims.",
+      agent: %{
+        adapter: "codex",
+        session_id: "agent-session-001",
+        profile_id: "agent-profile-implementer"
+      },
+      base_commit: "1111111",
+      head_commit: "2222222",
+      autonomy_level: "L1",
+      changed_files: ["lib/conveyor/artifacts/projector.ex", "lib/conveyor/artifacts/dossier.ex"],
+      diff_ref: "artifact://diffs/run-20260617-0001.patch",
+      conductor_commands: [
+        %{
+          command_id: "cmd-format",
+          command: "mix format --check-formatted",
+          exit_code: 0,
+          status: "pass",
+          evidence_ref: "artifact://conductor/format.log"
+        },
+        %{
+          command_id: "cmd-test",
+          command: "mix test test/conveyor/artifacts/projector_test.exs",
+          exit_code: 0,
+          status: "pass",
+          evidence_ref: "artifact://conductor/mix-test.log"
+        }
+      ],
+      acceptance_criteria: [
+        %{criterion_id: "AC-1", description: "Evidence comes from conductor verification."},
+        %{criterion_id: "AC-2", description: "Human reports include PR-ready evidence refs."}
+      ],
+      acceptance_results: %{
+        "AC-1" => %{
+          status: "pass",
+          evidence_refs: ["artifact://conductor/mix-test.log"]
+        },
+        "AC-2" => %{
+          status: "pass",
+          evidence_refs: ["artifact://reports/dossier.md", "artifact://reports/pr_body.md"]
+        }
+      },
+      quality_refs: ["artifact://quality/ubs.txt"],
+      policy_violations: [],
+      review_result: %{decision: "not_reviewed", evidence_refs: []},
+      gate_result: %{decision: "not_run", evidence_refs: []},
+      known_risks: [
+        %{
+          risk_id: "risk-report-circular-digest",
+          severity: "low",
+          summary: "Final bundle root digest is recorded in run_bundle.json after projection."
+        }
+      ],
+      created_at: ~U[2026-06-17 00:40:00Z]
+    }
   end
 
   defp store_secret_artifacts(backend) do

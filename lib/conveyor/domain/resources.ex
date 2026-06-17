@@ -2159,7 +2159,21 @@ defmodule Conveyor.Domain.GateResult do
       attrs,
       [:gate_result_id, :run_attempt_id, :station_run_id, :decision, :suite_kind],
       %{},
-      [:review_id, :evidence_refs, :finding_refs, :metadata]
+      [
+        :review_id,
+        :evidence_refs,
+        :finding_refs,
+        :gate_version,
+        :gate_code_digest,
+        :policy_digest,
+        :contract_lock_digest,
+        :canary_suite_version,
+        :stage_results,
+        :stage_log,
+        :failure_findings,
+        :transition_plan,
+        :metadata
+      ]
     )
   end
 

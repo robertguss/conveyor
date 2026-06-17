@@ -444,16 +444,26 @@ defmodule Conveyor.SandboxRunner do
     end)
   end
 
-  defp run_docker(args, opts), do: run_command("docker", args, opts)
-  defp run_git(args, opts), do: run_command("git", args, opts)
-
-  defp run_command(command, args, opts) do
-    case System.cmd(command, args, opts) do
-      {output, 0} -> {:ok, output, 0}
-      {output, exit_code} -> {:error, output, exit_code}
+  defp run_docker(args, opts) do
+    if System.find_executable("docker") do
+      case System.cmd("docker", args, opts) do
+        {output, 0} -> {:ok, output, 0}
+        {output, exit_code} -> {:error, output, exit_code}
+      end
+    else
+      {:error, "docker executable not found", nil}
     end
-  rescue
-    exception -> {:error, Exception.message(exception), nil}
+  end
+
+  defp run_git(args, opts) do
+    if System.find_executable("git") do
+      case System.cmd("git", args, opts) do
+        {output, 0} -> {:ok, output, 0}
+        {output, exit_code} -> {:error, output, exit_code}
+      end
+    else
+      {:error, "git executable not found", nil}
+    end
   end
 
   defp purpose!(attrs) do
