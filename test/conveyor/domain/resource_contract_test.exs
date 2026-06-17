@@ -1,6 +1,14 @@
 defmodule Conveyor.Domain.ResourceContractTest do
   use ExUnit.Case, async: false
 
+  alias Conveyor.Repo
+
+  setup do
+    :ok = Ecto.Adapters.SQL.Sandbox.checkout(Repo)
+    Ecto.Adapters.SQL.Sandbox.mode(Repo, {:shared, self()})
+    :ok
+  end
+
   test "registers every active Phase 0/1 resource in the Ash domain" do
     registered = Ash.Domain.Info.resources(Conveyor.Domain) |> MapSet.new()
 
@@ -157,6 +165,207 @@ defmodule Conveyor.Domain.ResourceContractTest do
              )
 
     assert Exception.message(error) =~ "payload"
+  end
+
+  test "Plan state machine enforces readiness guards and appends one ledger event" do
+    assert {:ok, plan} =
+             Ash.create(
+               Conveyor.Domain.Plan,
+               Conveyor.Domain.Plan.create_attrs!(%{plan_id: "state-plan-001"}),
+               action: :create
+             )
+
+    assert {:error, finding} =
+             Conveyor.Domain.Plan.transition(plan, :prepare_handoff, %{
+               trace_id: "trace-state-plan-001",
+               span_id: "span-state-plan-001"
+             })
+
+    assert %{
+             category: "rejected_transition_guard",
+             failure_category: "illegal_transition",
+             transition: "prepare_handoff",
+             from_state: "draft",
+             explanation: explanation
+           } = finding
+
+    assert explanation =~ "cannot move"
+    assert [] = Conveyor.Ledger.replay_timeline("state-plan-001")
+
+    assert {:ok, audited, audit_event, [_outbox], audit_log} =
+             Conveyor.Domain.Plan.transition(
+               plan,
+               :audit,
+               %{artifact_refs: ["sha256:plan-audit"]},
+               trace_id: "trace-state-plan-001",
+               span_id: "span-state-plan-audit",
+               stream_id: "state-plan-001"
+             )
+
+    assert audited.payload["plan_state"] == "audited"
+    assert audit_log.category == "domain_state_transition"
+    assert audit_event.event_type == "domain_state_transition.plan.audit"
+
+    assert {:ok, handoff_ready, _event, [_outbox], _log} =
+             Conveyor.Domain.Plan.transition(
+               audited,
+               :prepare_handoff,
+               %{plan_ready: true, contract_lock_id: "lock-plan-001"},
+               trace_id: "trace-state-plan-001",
+               span_id: "span-state-plan-handoff",
+               stream_id: "state-plan-001"
+             )
+
+    assert handoff_ready.payload["plan_state"] == "handoff_ready"
+
+    timeline = Conveyor.Ledger.replay_timeline("state-plan-001")
+
+    assert Enum.map(timeline, & &1.event_type) == [
+             "domain_state_transition.plan.audit",
+             "domain_state_transition.plan.prepare_handoff"
+           ]
+  end
+
+  test "Slice state machine keeps product lifecycle separate from run failures" do
+    assert {:ok, slice} =
+             Ash.create(
+               Conveyor.Domain.Slice,
+               Conveyor.Domain.Slice.create_attrs!(%{
+                 slice_id: "state-slice-001",
+                 plan_id: "state-plan-001"
+               }),
+               action: :create
+             )
+
+    assert {:error, finding} =
+             Conveyor.Domain.Slice.transition(slice, :approve, %{
+               actor: "reviewer@example.com",
+               previous_actor: "reviewer@example.com"
+             })
+
+    assert %{
+             category: "rejected_transition_guard",
+             failure_category: "guard_failed",
+             guard: "actor_separated",
+             explanation: "The same actor cannot perform both sides of this transition."
+           } = finding
+
+    assert {:ok, approved, event, [_outbox], log} =
+             Conveyor.Domain.Slice.transition(
+               slice,
+               :approve,
+               %{actor: "reviewer@example.com", previous_actor: "author@example.com"},
+               trace_id: "trace-state-slice-001",
+               span_id: "span-state-slice-approve",
+               stream_id: "state-slice-001"
+             )
+
+    assert approved.payload["slice_state"] == "approved"
+    assert event.event_type == "domain_state_transition.slice.approve"
+
+    assert [%{guard: "actor_separated", status: "passed", explanation: explanation}] =
+             log.guard_results
+
+    assert is_binary(explanation)
+
+    assert {:ok, blocked, block_event, [_outbox], _log} =
+             Conveyor.Domain.Slice.transition(
+               approved,
+               :block,
+               %{reason: "external dependency missing"},
+               trace_id: "trace-state-slice-001",
+               span_id: "span-state-slice-block",
+               stream_id: "state-slice-001"
+             )
+
+    assert blocked.payload["slice_state"] == "blocked"
+    assert block_event.event_type == "domain_state_transition.slice.block"
+
+    timeline = Conveyor.Ledger.replay_timeline("state-slice-001")
+    assert length(timeline) == 2
+  end
+
+  test "RunAttempt state machine guards autonomy, artifacts, review, gate, and reports" do
+    assert {:ok, attempt} =
+             Ash.create(
+               Conveyor.Domain.RunAttempt,
+               Conveyor.Domain.RunAttempt.create_attrs!(%{
+                 run_attempt_id: "state-attempt-001",
+                 slice_id: "state-slice-001",
+                 run_spec_sha256: "sha256:run-spec-state-001",
+                 attempt_number: 1
+               }),
+               action: :create
+             )
+
+    assert {:error, finding} =
+             Conveyor.Domain.RunAttempt.transition(attempt, :start, %{
+               plan_ready: true,
+               contract_lock_id: "lock-state-attempt-001",
+               autonomy_allowed: false
+             })
+
+    assert %{
+             category: "rejected_transition_guard",
+             failure_category: "guard_failed",
+             guard: "autonomy_allowed",
+             explanation: "Autonomy policy must allow this transition."
+           } = finding
+
+    assert {:ok, running, start_event, [_outbox], _log} =
+             Conveyor.Domain.RunAttempt.transition(
+               attempt,
+               :start,
+               %{
+                 plan_ready: true,
+                 contract_lock_id: "lock-state-attempt-001",
+                 autonomy_allowed: true
+               },
+               trace_id: "trace-state-attempt-001",
+               span_id: "span-state-attempt-start",
+               stream_id: "state-attempt-001"
+             )
+
+    assert running.payload["attempt_state"] == "running"
+    assert running.payload["attempt_status"] == "running"
+    assert start_event.event_type == "domain_state_transition.run_attempt.start"
+
+    transitions = [
+      {:record_evidence, %{artifact_refs: ["sha256:evidence"]}, "evidence_recorded"},
+      {
+        :review,
+        %{
+          actor: "reviewer@example.com",
+          previous_actor: "author@example.com",
+          review_decision: "approve"
+        },
+        "reviewed"
+      },
+      {:gate, %{gate_decision: "pass"}, "gated"},
+      {:report, %{artifact_refs: ["sha256:report"]}, "reported"}
+    ]
+
+    final_attempt =
+      Enum.reduce(transitions, running, fn {transition, context, expected_state}, record ->
+        assert {:ok, updated, _event, [_outbox], _log} =
+                 Conveyor.Domain.RunAttempt.transition(
+                   record,
+                   transition,
+                   context,
+                   trace_id: "trace-state-attempt-001",
+                   span_id: "span-state-attempt-#{transition}",
+                   stream_id: "state-attempt-001"
+                 )
+
+        assert updated.payload["attempt_state"] == expected_state
+        updated
+      end)
+
+    assert final_attempt.payload["attempt_status"] == "reported"
+
+    timeline = Conveyor.Ledger.replay_timeline("state-attempt-001")
+    assert length(timeline) == 5
+    assert List.last(timeline).event_type == "domain_state_transition.run_attempt.report"
   end
 
   test "artifact and bundle resources use content-addressed evidence identity" do
@@ -666,6 +875,117 @@ defmodule Conveyor.Domain.ResourceContractTest do
 
     assert Enum.any?(effect_states, &(&1.effect_id == "idem-effect-001"))
     assert Enum.any?(effect_states, &(&1.effect_status == "unknown"))
+  end
+
+  test "RunBudget records counters and policy-controlled exhaustion stops" do
+    run_budget =
+      Conveyor.Domain.RunBudget.build!(%{
+        run_budget_id: "budget-run-001",
+        run_attempt_id: "budget-attempt-001",
+        policy_profile: "implement",
+        limits: %{
+          wall_clock_ms: 10_000,
+          idle_ms: 2_000,
+          tool_calls: 4,
+          command_count: 6,
+          output_bytes: 4096,
+          repeated_command_failures: 2,
+          same_file_rewrites: 2,
+          no_diff_progress_ms: 3_000,
+          tokens: 20_000,
+          cost_micros: 50_000
+        },
+        consumed_counters: %{tool_calls: 1, command_count: 1}
+      })
+
+    assert run_budget["schema_version"] == "conveyor.run_budget@1"
+    assert run_budget["budget_status"] == "active"
+    assert run_budget["limits"]["output_bytes"] == 4096
+    assert run_budget["consumed_counters"]["tool_calls"] == 1
+
+    assert {:ok, record} =
+             Ash.create(
+               Conveyor.Domain.RunBudget,
+               Conveyor.Domain.RunBudget.create_attrs!(run_budget),
+               action: :create
+             )
+
+    assert record.external_id == "budget-run-001"
+
+    assert %{
+             schema_version: "conveyor.run_budget_evaluation@1",
+             category: "run_budget_evaluation",
+             budget_status: "within_budget",
+             policy_controlled_stop: false,
+             ordinary_agent_failure: false,
+             findings: []
+           } = Conveyor.Domain.RunBudget.evaluate(run_budget, %{output_bytes: 1024})
+
+    assert %{
+             budget_status: "policy_controlled_stop",
+             policy_controlled_stop: true,
+             ordinary_agent_failure: false,
+             consumed_counters: consumed_counters,
+             limit_counters: limit_counters,
+             stop_reasons: stop_reasons,
+             findings: findings
+           } =
+             Conveyor.Domain.RunBudget.evaluate(run_budget, %{
+               wall_clock_ms: 10_001,
+               tokens: 20_001
+             })
+
+    assert consumed_counters["wall_clock_ms"] == 10_001
+    assert limit_counters["tokens"] == 20_000
+    assert stop_reasons == ["wall_clock_exhausted", "token_budget_exhausted"]
+
+    assert Enum.all?(findings, &(&1.policy_controlled_stop and not &1.ordinary_agent_failure))
+    assert Enum.map(findings, & &1.action) == ["stop_run_attempt", "stop_run_attempt"]
+  end
+
+  test "RunBudget treats non-progress fixtures as policy stops, not agent failures" do
+    run_budget =
+      Conveyor.Domain.RunBudget.build!(%{
+        run_budget_id: "budget-non-progress-001",
+        run_attempt_id: "budget-attempt-002",
+        limits: %{
+          idle_ms: 2_000,
+          output_bytes: 4096,
+          repeated_command_failures: 2,
+          same_file_rewrites: 2,
+          no_diff_progress_ms: 3_000
+        }
+      })
+
+    scenarios = [
+      {%{repeated_command_failures: 3}, "repeated_command_failures",
+       "repeated_identical_failures"},
+      {%{output_bytes: 4097}, "output_bytes", "output_flooding"},
+      {%{idle_ms: 2_001}, "idle_ms", "heartbeat_without_progress"},
+      {%{no_diff_progress_ms: 3_001}, "no_diff_progress_ms", "no_patch_progress"},
+      {%{same_file_rewrites: 3}, "same_file_rewrites", "same_file_rewrite_loop"}
+    ]
+
+    for {consumed, counter, stop_reason} <- scenarios do
+      assert %{
+               budget_status: "policy_controlled_stop",
+               policy_controlled_stop: true,
+               ordinary_agent_failure: false,
+               stop_reasons: [^stop_reason],
+               findings: [
+                 %{
+                   schema_version: "conveyor.run_budget_finding@1",
+                   category: "run_budget_stop",
+                   failure_category: "budget_exhausted",
+                   counter: ^counter,
+                   stop_reason: ^stop_reason,
+                   policy_controlled_stop: true,
+                   ordinary_agent_failure: false,
+                   action: "stop_run_attempt"
+                 }
+               ]
+             } = Conveyor.Domain.RunBudget.evaluate(run_budget, consumed)
+    end
   end
 
   defp resources, do: Conveyor.Domain.Resources.resource_modules()

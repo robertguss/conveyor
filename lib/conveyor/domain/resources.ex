@@ -288,6 +288,348 @@ defmodule Conveyor.Domain.ExecutionPayload do
   defp normalize(value), do: PayloadHelpers.normalize_payload(value)
 end
 
+defmodule Conveyor.Domain.StateMachine do
+  @moduledoc false
+
+  alias Conveyor.Domain.PayloadHelpers
+  alias Conveyor.Ledger
+  alias Conveyor.Repo
+
+  @schema_version "conveyor.domain_state_machine@1"
+
+  def transition(resource, record, machine, transition, context \\ %{}, opts \\ [])
+      when is_atom(resource) and is_map(machine) and is_map(context) do
+    transition = to_string(transition)
+    payload = payload(record)
+    current_state = current_state(payload, machine)
+    context = normalize_context(context)
+
+    with {:ok, rule} <- transition_rule(resource, machine, transition, current_state, context),
+         {:ok, guard_results} <-
+           guard_results(resource, machine, transition, current_state, rule, context) do
+      next_state = Map.fetch!(rule, :to)
+
+      updated_payload =
+        transition_payload(payload, machine, transition, current_state, next_state)
+
+      log =
+        transition_log(
+          resource,
+          record,
+          machine,
+          transition,
+          current_state,
+          next_state,
+          guard_results
+        )
+
+      Repo.transaction(fn ->
+        with {:ok, updated_record, notifications} <-
+               Ash.update(record, %{payload: updated_payload},
+                 action: :update,
+                 return_notifications?: true
+               ),
+             {:ok, event, outbox_entries} <-
+               Ledger.append_event(
+                 ledger_event(
+                   resource,
+                   record,
+                   transition,
+                   current_state,
+                   next_state,
+                   log,
+                   context,
+                   opts
+                 ),
+                 channels: Keyword.get(opts, :channels, ["timeline"])
+               ) do
+          {updated_record, event, outbox_entries, Map.put(log, :ledger_event_id, event.id),
+           notifications}
+        else
+          {:error, reason} -> Repo.rollback(reason)
+        end
+      end)
+      |> case do
+        {:ok, {updated_record, event, outbox_entries, transition_log, notifications}} ->
+          Ash.Notifier.notify(notifications)
+          {:ok, updated_record, event, outbox_entries, transition_log}
+
+        {:error, reason} ->
+          {:error, reason}
+      end
+    end
+  end
+
+  defp transition_rule(resource, machine, transition, current_state, context) do
+    case machine.transitions[transition] do
+      nil ->
+        {:error,
+         rejected_transition(
+           resource,
+           machine,
+           transition,
+           current_state,
+           nil,
+           "unknown_transition",
+           "No transition named #{transition} is configured.",
+           context
+         )}
+
+      rule ->
+        if allowed_from?(current_state, Map.fetch!(rule, :from)) do
+          {:ok, rule}
+        else
+          {:error,
+           rejected_transition(
+             resource,
+             machine,
+             transition,
+             current_state,
+             Map.fetch!(rule, :to),
+             "illegal_transition",
+             "Transition #{transition} cannot move #{inspect(resource)} from #{current_state}.",
+             context
+           )}
+        end
+    end
+  end
+
+  defp guard_results(resource, machine, transition, current_state, rule, context) do
+    Enum.reduce_while(Map.get(rule, :guards, []), {:ok, []}, fn guard, {:ok, results} ->
+      case evaluate_guard(guard, context) do
+        {:ok, result} ->
+          {:cont, {:ok, [result | results]}}
+
+        {:error, result} ->
+          finding =
+            rejected_transition(
+              resource,
+              machine,
+              transition,
+              current_state,
+              Map.fetch!(rule, :to),
+              "guard_failed",
+              result.explanation,
+              context
+            )
+            |> Map.put(:guard, result.guard)
+
+          {:halt, {:error, finding}}
+      end
+    end)
+    |> case do
+      {:ok, results} -> {:ok, Enum.reverse(results)}
+      {:error, finding} -> {:error, finding}
+    end
+  end
+
+  defp evaluate_guard(guard, context) do
+    guard = to_string(guard)
+
+    passed? =
+      case guard do
+        "plan_ready" ->
+          truthy?(context["plan_ready"]) || context["readiness"] == "ready" ||
+            context["plan_status"] in ["handoff_ready", "active", "completed"]
+
+        "contract_locked" ->
+          truthy?(context["contract_locked"]) || present?(context["contract_lock_id"]) ||
+            present?(context["contract_lock_sha256"]) || present?(context["lock_ref"])
+
+        "actor_separated" ->
+          truthy?(context["actor_separated"]) || separated_actors?(context)
+
+        "artifacts_present" ->
+          truthy?(context["artifacts_present"]) || present?(context["artifact_refs"]) ||
+            present?(context["artifacts"]) || present?(context["evidence_refs"])
+
+        "gate_complete" ->
+          truthy?(context["gate_complete"]) || context["gate_status"] in ["pass", "passed"] ||
+            context["gate_decision"] in ["pass", "passed"]
+
+        "autonomy_allowed" ->
+          truthy?(context["autonomy_allowed"]) ||
+            context["autonomy_policy"] in ["allow", "allowed"]
+
+        "review_approved" ->
+          truthy?(context["review_approved"]) ||
+            context["review_decision"] in ["approve", "approved"]
+
+        "reason_present" ->
+          present?(context["reason"])
+
+        other ->
+          truthy?(context[other])
+      end
+
+    result = %{
+      guard: guard,
+      status: if(passed?, do: "passed", else: "failed"),
+      explanation: guard_explanation(guard)
+    }
+
+    if passed?, do: {:ok, result}, else: {:error, result}
+  end
+
+  defp transition_payload(payload, machine, transition, current_state, next_state) do
+    transition_record = %{
+      "schema_version" => @schema_version,
+      "category" => "domain_state_transition",
+      "transition" => transition,
+      "from_state" => current_state,
+      "to_state" => next_state
+    }
+
+    payload =
+      payload
+      |> put_status_alias(machine, next_state)
+      |> Map.put(machine.state_key, next_state)
+      |> Map.put("lifecycle_state", next_state)
+
+    Map.update(payload, "transition_log", [transition_record], &(&1 ++ [transition_record]))
+  end
+
+  defp transition_log(
+         resource,
+         record,
+         machine,
+         transition,
+         current_state,
+         next_state,
+         guard_results
+       ) do
+    %{
+      schema_version: @schema_version,
+      category: "domain_state_transition",
+      resource: inspect(resource),
+      external_id: external_id(record),
+      state_key: machine.state_key,
+      transition: transition,
+      from_state: current_state,
+      to_state: next_state,
+      guard_results: guard_results
+    }
+  end
+
+  defp rejected_transition(
+         resource,
+         machine,
+         transition,
+         current_state,
+         next_state,
+         category,
+         explanation,
+         context
+       ) do
+    %{
+      schema_version: @schema_version,
+      category: "rejected_transition_guard",
+      failure_category: category,
+      resource: inspect(resource),
+      external_id: context["external_id"],
+      state_key: machine.state_key,
+      transition: transition,
+      from_state: current_state,
+      to_state: next_state,
+      explanation: explanation,
+      context_keys: Map.keys(context)
+    }
+  end
+
+  defp ledger_event(resource, record, transition, current_state, next_state, log, context, opts) do
+    resource_name = resource_name(resource)
+    external_id = external_id(record)
+
+    %{
+      idempotency_key:
+        Keyword.get(opts, :idempotency_key) ||
+          context["idempotency_key"] ||
+          PayloadHelpers.canonical_sha256(%{
+            "resource" => inspect(resource),
+            "external_id" => external_id,
+            "transition" => transition,
+            "from_state" => current_state,
+            "to_state" => next_state
+          }),
+      trace_id: Keyword.get(opts, :trace_id) || context["trace_id"] || "trace-#{external_id}",
+      span_id: Keyword.get(opts, :span_id) || context["span_id"] || "span-#{transition}",
+      stream_id: Keyword.get(opts, :stream_id) || context["stream_id"] || external_id,
+      event_type: "domain_state_transition.#{resource_name}.#{transition}",
+      summary:
+        "#{inspect(resource)} #{external_id} #{current_state}->#{next_state} via #{transition}",
+      payload: PayloadHelpers.normalize_map(log),
+      metadata: %{
+        "resource" => inspect(resource),
+        "transition" => transition,
+        "from_state" => current_state,
+        "to_state" => next_state
+      }
+    }
+  end
+
+  defp current_state(payload, machine) do
+    Map.get(payload, machine.state_key) || Map.get(payload, "lifecycle_state") ||
+      machine.initial_state
+  end
+
+  defp allowed_from?(current_state, allowed) when is_list(allowed) do
+    "*" in allowed || current_state in allowed
+  end
+
+  defp allowed_from?(_current_state, "*"), do: true
+  defp allowed_from?(current_state, allowed), do: current_state == allowed
+
+  defp separated_actors?(context) do
+    actor = context["actor"] || context["reviewer"] || context["approver"]
+    previous_actor = context["previous_actor"] || context["author"] || context["requester"]
+
+    present?(actor) and present?(previous_actor) and actor != previous_actor
+  end
+
+  defp guard_explanation("plan_ready"), do: "Plan readiness evidence is required."
+  defp guard_explanation("contract_locked"), do: "A current contract lock is required."
+
+  defp guard_explanation("actor_separated"),
+    do: "The same actor cannot perform both sides of this transition."
+
+  defp guard_explanation("artifacts_present"), do: "Artifact or evidence references are required."
+  defp guard_explanation("gate_complete"), do: "Gate completion evidence is required."
+  defp guard_explanation("autonomy_allowed"), do: "Autonomy policy must allow this transition."
+  defp guard_explanation("review_approved"), do: "An approved review decision is required."
+  defp guard_explanation("reason_present"), do: "A transition reason is required."
+  defp guard_explanation(guard), do: "Guard #{guard} did not pass."
+
+  defp normalize_context(context) do
+    Map.new(context, fn {key, value} ->
+      {to_string(key), PayloadHelpers.normalize_payload(value)}
+    end)
+  end
+
+  defp payload(%{payload: payload}) when is_map(payload),
+    do: PayloadHelpers.normalize_map(payload)
+
+  defp payload(payload) when is_map(payload), do: PayloadHelpers.normalize_map(payload)
+
+  defp external_id(%{external_id: external_id}) when is_binary(external_id), do: external_id
+  defp external_id(record) when is_map(record), do: Map.fetch!(record, "external_id")
+
+  defp resource_name(resource),
+    do: resource |> Module.split() |> List.last() |> Macro.underscore()
+
+  defp put_status_alias(payload, %{status_key: status_key}, next_state) do
+    Map.put(payload, status_key, next_state)
+  end
+
+  defp put_status_alias(payload, _machine, _next_state), do: payload
+
+  defp truthy?(value), do: value in [true, "true", "yes", "allow", "allowed", "pass", "passed"]
+  defp present?(value) when is_binary(value), do: String.trim(value) != ""
+  defp present?(value) when is_list(value), do: value != []
+  defp present?(value) when is_map(value), do: map_size(value) > 0
+  defp present?(nil), do: false
+  defp present?(_value), do: true
+end
+
 defmodule Conveyor.Domain.ExecutionResources do
   @moduledoc """
   Payload-level association helpers for execution resources.
@@ -387,6 +729,54 @@ end
 
 defmodule Conveyor.Domain.Plan do
   use Conveyor.Domain.ActiveResource, table: "plans"
+
+  @schema_version "conveyor.plan@1"
+  @states ["draft", "audited", "handoff_ready", "active", "completed"]
+  @transitions %{
+    "audit" => %{from: "draft", to: "audited", guards: ["artifacts_present"]},
+    "prepare_handoff" => %{
+      from: "audited",
+      to: "handoff_ready",
+      guards: ["plan_ready", "contract_locked"]
+    },
+    "activate" => %{
+      from: "handoff_ready",
+      to: "active",
+      guards: ["actor_separated", "autonomy_allowed"]
+    },
+    "complete" => %{from: "active", to: "completed", guards: ["gate_complete"]}
+  }
+  @state_machine %{state_key: "plan_state", initial_state: "draft", transitions: @transitions}
+
+  def lifecycle_states, do: @states
+  def transition_rules, do: @transitions
+
+  def build!(attrs) when is_map(attrs) do
+    Conveyor.Domain.ExecutionPayload.build!(
+      @schema_version,
+      attrs,
+      [:plan_id],
+      %{plan_state: "draft"},
+      [:title, :summary, :requirement_ids, :metadata]
+    )
+  end
+
+  def create_attrs!(attrs) when is_map(attrs) do
+    attrs
+    |> build!()
+    |> Conveyor.Domain.ExecutionPayload.create_attrs!(:plan_id, :plan_id)
+  end
+
+  def transition(record, transition, context \\ %{}, opts \\ []) do
+    Conveyor.Domain.StateMachine.transition(
+      __MODULE__,
+      record,
+      @state_machine,
+      transition,
+      context,
+      opts
+    )
+  end
 end
 
 defmodule Conveyor.Domain.Requirement do
@@ -557,6 +947,78 @@ end
 
 defmodule Conveyor.Domain.Slice do
   use Conveyor.Domain.ActiveResource, table: "slices"
+
+  @schema_version "conveyor.slice@1"
+  @states [
+    "drafted",
+    "approved",
+    "ready",
+    "in_progress",
+    "gated",
+    "integrated",
+    "done",
+    "rejected",
+    "blocked",
+    "cancelled"
+  ]
+  @transitions %{
+    "approve" => %{from: "drafted", to: "approved", guards: ["actor_separated"]},
+    "ready" => %{
+      from: "approved",
+      to: "ready",
+      guards: ["plan_ready", "contract_locked", "artifacts_present"]
+    },
+    "start" => %{from: "ready", to: "in_progress", guards: ["autonomy_allowed"]},
+    "gate" => %{from: "in_progress", to: "gated", guards: ["gate_complete"]},
+    "integrate" => %{
+      from: "gated",
+      to: "integrated",
+      guards: ["review_approved", "artifacts_present"]
+    },
+    "finish" => %{from: "integrated", to: "done", guards: []},
+    "reject" => %{from: ["drafted", "approved"], to: "rejected", guards: ["reason_present"]},
+    "block" => %{
+      from: ["approved", "ready", "in_progress"],
+      to: "blocked",
+      guards: ["reason_present"]
+    },
+    "cancel" => %{
+      from: ["ready", "in_progress", "gated"],
+      to: "cancelled",
+      guards: ["reason_present"]
+    }
+  }
+  @state_machine %{state_key: "slice_state", initial_state: "drafted", transitions: @transitions}
+
+  def lifecycle_states, do: @states
+  def transition_rules, do: @transitions
+
+  def build!(attrs) when is_map(attrs) do
+    Conveyor.Domain.ExecutionPayload.build!(
+      @schema_version,
+      attrs,
+      [:slice_id, :plan_id],
+      %{slice_state: "drafted"},
+      [:title, :requirement_ids, :metadata]
+    )
+  end
+
+  def create_attrs!(attrs) when is_map(attrs) do
+    attrs
+    |> build!()
+    |> Conveyor.Domain.ExecutionPayload.create_attrs!(:slice_id, :slice_id)
+  end
+
+  def transition(record, transition, context \\ %{}, opts \\ []) do
+    Conveyor.Domain.StateMachine.transition(
+      __MODULE__,
+      record,
+      @state_machine,
+      transition,
+      context,
+      opts
+    )
+  end
 end
 
 defmodule Conveyor.Domain.DiffPolicy do
@@ -661,16 +1123,19 @@ defmodule Conveyor.Domain.RunSpec do
       |> fetch_required!(:contract_digests)
       |> normalize_digest_set!()
 
-    unsigned = %{
-      "schema_version" => @schema_version,
-      "run_id" => fetch_required!(attrs, :run_id),
-      "project_id" => fetch_required!(attrs, :project_id),
-      "base_commit" => fetch_required!(attrs, :base_commit),
-      "slice_id" => fetch_required!(attrs, :slice_id),
-      "autonomy_level" => fetch_required!(attrs, :autonomy_level),
-      "contract_digests" => contract_digests,
-      "stations" => normalize_stations!(fetch_required!(attrs, :stations))
-    }
+    unsigned =
+      %{
+        "schema_version" => @schema_version,
+        "run_id" => fetch_required!(attrs, :run_id),
+        "project_id" => fetch_required!(attrs, :project_id),
+        "base_commit" => fetch_required!(attrs, :base_commit),
+        "slice_id" => fetch_required!(attrs, :slice_id),
+        "autonomy_level" => fetch_required!(attrs, :autonomy_level),
+        "contract_digests" => contract_digests,
+        "stations" => normalize_stations!(fetch_required!(attrs, :stations))
+      }
+      |> maybe_put_capability_snapshot(attrs)
+      |> validate_agent_profile_ceiling!()
 
     run_spec_sha256 = sha256(unsigned)
 
@@ -768,6 +1233,38 @@ defmodule Conveyor.Domain.RunSpec do
     raise ArgumentError, "RunSpec stations must be a non-empty list"
   end
 
+  defp maybe_put_capability_snapshot(run_spec, attrs) do
+    case Map.get(attrs, :agent_profile_capability_snapshot) ||
+           Map.get(attrs, "agent_profile_capability_snapshot") do
+      nil ->
+        run_spec
+
+      snapshot ->
+        normalized_snapshot = Conveyor.AgentRunner.normalize_capability_snapshot!(snapshot)
+
+        run_spec
+        |> Map.put("agent_profile_capability_snapshot", normalized_snapshot)
+        |> Map.put("negative_agent_capabilities", normalized_snapshot["negative_capabilities"])
+        |> Map.put(
+          "agent_profile_autonomy_ceiling",
+          normalized_snapshot["effective_autonomy_ceiling"]
+        )
+    end
+  end
+
+  defp validate_agent_profile_ceiling!(%{"agent_profile_autonomy_ceiling" => ceiling} = run_spec) do
+    selected_level = Map.fetch!(run_spec, "autonomy_level")
+
+    if Conveyor.AgentRunner.autonomy_allows?(selected_level, ceiling) do
+      run_spec
+    else
+      raise ArgumentError,
+            "RunSpec autonomy_level #{selected_level} exceeds agent profile ceiling #{ceiling}"
+    end
+  end
+
+  defp validate_agent_profile_ceiling!(run_spec), do: run_spec
+
   defp bind_station_io(station, run_spec_sha256) do
     station
     |> Map.update!("inputs", &Map.put(&1, "run_spec_sha256", run_spec_sha256))
@@ -838,19 +1335,101 @@ end
 
 defmodule Conveyor.Domain.AgentProfile do
   use Conveyor.Domain.ActiveResource, table: "agent_profiles"
+
+  @schema_version "conveyor.agent_profile@1"
+
+  def build!(attrs) when is_map(attrs) do
+    snapshot = Conveyor.AgentRunner.capability_snapshot(attrs)
+
+    %{
+      "schema_version" => @schema_version,
+      "agent_profile_id" => snapshot["agent_profile_id"],
+      "adapter" => snapshot["adapter"],
+      "name" =>
+        Conveyor.Domain.PayloadHelpers.get(
+          attrs,
+          :name,
+          snapshot["agent_profile_id"]
+        ),
+      "capabilities" => snapshot["capabilities"],
+      "negative_capabilities" => snapshot["negative_capabilities"],
+      "known_limitations" => snapshot["known_limitations"],
+      "capability_snapshot" => snapshot,
+      "autonomy_ceiling" => snapshot["effective_autonomy_ceiling"],
+      "metadata" =>
+        attrs
+        |> Conveyor.Domain.PayloadHelpers.get(:metadata, %{})
+        |> Conveyor.Domain.PayloadHelpers.normalize_map()
+    }
+  end
+
+  def create_attrs!(attrs) when is_map(attrs) do
+    payload = build!(attrs)
+
+    %{
+      external_id: payload["agent_profile_id"],
+      name: payload["name"],
+      status: "active",
+      payload: payload
+    }
+  end
 end
 
 defmodule Conveyor.Domain.RunAttempt do
   use Conveyor.Domain.ActiveResource, table: "run_attempts"
 
   @schema_version "conveyor.run_attempt@1"
+  @states [
+    "planned",
+    "running",
+    "evidence_recorded",
+    "reviewed",
+    "gated",
+    "reported",
+    "failed",
+    "cancelled"
+  ]
+  @transitions %{
+    "start" => %{
+      from: "planned",
+      to: "running",
+      guards: ["plan_ready", "contract_locked", "autonomy_allowed"]
+    },
+    "record_evidence" => %{
+      from: "running",
+      to: "evidence_recorded",
+      guards: ["artifacts_present"]
+    },
+    "review" => %{
+      from: "evidence_recorded",
+      to: "reviewed",
+      guards: ["actor_separated", "review_approved"]
+    },
+    "gate" => %{from: "reviewed", to: "gated", guards: ["gate_complete"]},
+    "report" => %{from: "gated", to: "reported", guards: ["artifacts_present"]},
+    "fail" => %{
+      from: ["planned", "running", "evidence_recorded", "reviewed", "gated"],
+      to: "failed",
+      guards: ["reason_present"]
+    },
+    "cancel" => %{from: ["planned", "running"], to: "cancelled", guards: ["reason_present"]}
+  }
+  @state_machine %{
+    state_key: "attempt_state",
+    status_key: "attempt_status",
+    initial_state: "planned",
+    transitions: @transitions
+  }
+
+  def lifecycle_states, do: @states
+  def transition_rules, do: @transitions
 
   def build!(attrs) when is_map(attrs) do
     Conveyor.Domain.ExecutionPayload.build!(
       @schema_version,
       attrs,
       [:run_attempt_id, :slice_id, :run_spec_sha256, :attempt_number],
-      %{attempt_status: "planned"},
+      %{attempt_state: "planned", attempt_status: "planned"},
       [:station_plan_sha256, :previous_run_attempt_id, :metadata]
     )
   end
@@ -864,6 +1443,17 @@ defmodule Conveyor.Domain.RunAttempt do
       status: "active",
       payload: payload
     }
+  end
+
+  def transition(record, transition, context \\ %{}, opts \\ []) do
+    Conveyor.Domain.StateMachine.transition(
+      __MODULE__,
+      record,
+      @state_machine,
+      transition,
+      context,
+      opts
+    )
   end
 end
 
@@ -1127,7 +1717,24 @@ defmodule Conveyor.Domain.ToolInvocation do
         :started_at
       ],
       %{tool_status: "running"},
-      [:completed_at, :exit_code, :artifact_refs, :metadata]
+      [
+        :completed_at,
+        :exit_code,
+        :artifact_refs,
+        :policy_profile,
+        :adapter_mode,
+        :command_spec,
+        :cwd,
+        :env_keys,
+        :network,
+        :timeout_ms,
+        :duration_ms,
+        :output_refs,
+        :output_sha256,
+        :policy_decision,
+        :transcript,
+        :metadata
+      ]
     )
   end
 
@@ -1498,6 +2105,166 @@ end
 
 defmodule Conveyor.Domain.RunBudget do
   use Conveyor.Domain.ActiveResource, table: "run_budgets"
+
+  @schema_version "conveyor.run_budget@1"
+  @evaluation_schema_version "conveyor.run_budget_evaluation@1"
+  @finding_schema_version "conveyor.run_budget_finding@1"
+  @counter_keys [
+    "wall_clock_ms",
+    "idle_ms",
+    "tool_calls",
+    "command_count",
+    "output_bytes",
+    "repeated_command_failures",
+    "same_file_rewrites",
+    "no_diff_progress_ms",
+    "tokens",
+    "cost_micros"
+  ]
+  @stop_reasons %{
+    "wall_clock_ms" => "wall_clock_exhausted",
+    "idle_ms" => "heartbeat_without_progress",
+    "tool_calls" => "tool_call_budget_exhausted",
+    "command_count" => "command_count_exhausted",
+    "output_bytes" => "output_flooding",
+    "repeated_command_failures" => "repeated_identical_failures",
+    "same_file_rewrites" => "same_file_rewrite_loop",
+    "no_diff_progress_ms" => "no_patch_progress",
+    "tokens" => "token_budget_exhausted",
+    "cost_micros" => "cost_budget_exhausted"
+  }
+
+  def counter_keys, do: @counter_keys
+
+  def build!(attrs) when is_map(attrs) do
+    attrs =
+      attrs
+      |> Map.put(
+        :limits,
+        attrs
+        |> Conveyor.Domain.PayloadHelpers.fetch_required!(:limits)
+        |> normalize_counters!(:limits)
+      )
+      |> Map.put(
+        :consumed_counters,
+        attrs
+        |> Conveyor.Domain.PayloadHelpers.get(:consumed_counters, %{})
+        |> normalize_counters!(:consumed_counters)
+      )
+
+    Conveyor.Domain.ExecutionPayload.build!(
+      @schema_version,
+      attrs,
+      [:run_budget_id, :run_attempt_id, :limits],
+      %{budget_status: "active"},
+      [:station_run_id, :policy_profile, :consumed_counters, :metadata]
+    )
+  end
+
+  def create_attrs!(attrs) when is_map(attrs) do
+    payload = build!(attrs)
+
+    %{
+      external_id: payload["run_budget_id"],
+      name: payload["run_attempt_id"],
+      status: "active",
+      payload: payload
+    }
+  end
+
+  def evaluate(run_budget, consumed_counters \\ %{})
+      when is_map(run_budget) and is_map(consumed_counters) do
+    budget = payload(run_budget)
+
+    consumed =
+      budget
+      |> Map.get("consumed_counters", %{})
+      |> Map.merge(normalize_counters!(consumed_counters, :consumed_counters))
+
+    findings =
+      budget
+      |> Map.fetch!("limits")
+      |> exceeded_findings(budget, consumed)
+
+    %{
+      schema_version: @evaluation_schema_version,
+      category: "run_budget_evaluation",
+      run_budget_id: budget["run_budget_id"],
+      run_attempt_id: budget["run_attempt_id"],
+      station_run_id: budget["station_run_id"],
+      policy_profile: budget["policy_profile"],
+      budget_status: evaluation_status(findings),
+      policy_controlled_stop: findings != [],
+      ordinary_agent_failure: false,
+      consumed_counters: Map.take(consumed, @counter_keys),
+      limit_counters: budget["limits"],
+      stop_reasons: Enum.map(findings, & &1.stop_reason),
+      findings: findings
+    }
+  end
+
+  defp exceeded_findings(limits, budget, consumed) do
+    @counter_keys
+    |> Enum.flat_map(fn counter ->
+      consumed_value = Map.get(consumed, counter, 0)
+
+      case Map.fetch(limits, counter) do
+        {:ok, limit} when consumed_value > limit ->
+          [finding(budget, counter, consumed_value, limit)]
+
+        _within_limit_or_unset ->
+          []
+      end
+    end)
+  end
+
+  defp finding(budget, counter, consumed, limit) do
+    %{
+      schema_version: @finding_schema_version,
+      category: "run_budget_stop",
+      failure_category: "budget_exhausted",
+      stop_reason: Map.fetch!(@stop_reasons, counter),
+      counter: counter,
+      consumed: consumed,
+      limit: limit,
+      run_budget_id: budget["run_budget_id"],
+      run_attempt_id: budget["run_attempt_id"],
+      policy_controlled_stop: true,
+      ordinary_agent_failure: false,
+      action: "stop_run_attempt"
+    }
+  end
+
+  defp evaluation_status([]), do: "within_budget"
+  defp evaluation_status([_ | _]), do: "policy_controlled_stop"
+
+  defp normalize_counters!(counters, label) when is_map(counters) do
+    Map.new(counters, fn {key, value} ->
+      counter = to_string(key)
+
+      if counter not in @counter_keys do
+        raise ArgumentError, "unknown #{label} counter: #{counter}"
+      end
+
+      {counter, normalize_counter_value!(value, label, counter)}
+    end)
+  end
+
+  defp normalize_counters!(_counters, label) do
+    raise ArgumentError, "#{label} must be a map"
+  end
+
+  defp normalize_counter_value!(value, _label, _counter) when is_integer(value) and value >= 0 do
+    value
+  end
+
+  defp normalize_counter_value!(value, label, counter) do
+    raise ArgumentError,
+          "#{label}.#{counter} must be a non-negative integer, got: #{inspect(value)}"
+  end
+
+  defp payload(%{payload: payload}) when is_map(payload), do: payload
+  defp payload(payload) when is_map(payload), do: payload
 end
 
 defmodule Conveyor.Domain.Incident do
