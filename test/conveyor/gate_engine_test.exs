@@ -147,6 +147,117 @@ defmodule Conveyor.GateEngineTest do
            end)
   end
 
+  test "test execution stage passes with baseline, calibrated acceptance, retries, and AC evidence" do
+    composition =
+      base_attrs()
+      |> Map.put(:stages, [
+        %{
+          stage_key: "test_execution",
+          status: "pass",
+          required: true,
+          details: %{
+            baseline: %{
+              status: "pass",
+              evidence_refs: ["artifact://gate/baseline.xml"]
+            },
+            locked_acceptance: %{
+              base_calibration: %{
+                status: "fail",
+                evidence_refs: ["artifact://gate/acceptance-base.xml"]
+              },
+              patch_result: %{
+                status: "pass",
+                evidence_refs: ["artifact://gate/acceptance-patch.xml"]
+              },
+              acceptance_results: [
+                %{
+                  criterion_id: "AC-001",
+                  status: "passed",
+                  evidence_refs: ["artifact://gate/ac-001.log"]
+                },
+                %{
+                  criterion_id: "AC-002",
+                  status: "skipped",
+                  skip_allowed: true,
+                  skip_reason:
+                    "AC-002 is explicitly allowed to be skipped by the locked TestPack.",
+                  evidence_refs: []
+                }
+              ],
+              required_criteria: ["AC-001", "AC-002"],
+              attempts: [
+                %{attempt: 1, status: "infra_error", classification: "infra"},
+                %{attempt: 2, status: "passed"}
+              ]
+            },
+            flake_policy: %{allowed: true, max_retries: 2}
+          }
+        }
+      ])
+      |> GateEngine.compose!()
+
+    assert composition.decision == "pass"
+    assert composition.failure_findings == []
+
+    assert [
+             %{
+               "stage_key" => "test_execution",
+               "passed" => true,
+               "findings" => []
+             }
+           ] = composition.gate_result["stage_results"]
+  end
+
+  test "test execution stage fails closed for incomplete acceptance evidence" do
+    composition =
+      base_attrs()
+      |> Map.put(:stages, [
+        %{
+          stage_key: "test_execution",
+          status: "pass",
+          required: true,
+          details: %{
+            baseline: %{status: "pass", evidence_refs: ["artifact://gate/baseline.xml"]},
+            locked_acceptance: %{
+              base_calibration: %{
+                status: "pass",
+                evidence_refs: ["artifact://gate/acceptance-base.xml"]
+              },
+              patch_result: %{
+                status: "pass",
+                evidence_refs: ["artifact://gate/acceptance-patch.xml"]
+              },
+              acceptance_results: [
+                %{criterion_id: "AC-001", status: "passed", evidence_refs: []},
+                %{criterion_id: "AC-002", status: "skipped", evidence_refs: []}
+              ],
+              required_criteria: ["AC-001", "AC-002", "AC-003"]
+            }
+          }
+        }
+      ])
+      |> GateEngine.compose!()
+
+    assert composition.decision == "fail"
+
+    assert [
+             %{
+               "stage_key" => "test_execution",
+               "failure_categories" => failure_categories,
+               "detail_findings" => detail_findings,
+               "next_action" => "resolve_test_execution_evidence_before_gate"
+             }
+           ] = composition.failure_findings
+
+    assert "acceptance_not_calibrated_red" in failure_categories
+    assert "missing_acceptance_evidence" in failure_categories
+    assert "skipped_acceptance_result" in failure_categories
+    assert "missing_acceptance_result" in failure_categories
+
+    assert Enum.all?(detail_findings, &(&1["category"] == "gate_test_execution"))
+    assert composition.gate_result["decision"] == "fail"
+  end
+
   defp base_attrs do
     %{
       gate_result_id: "gate-result-001",
