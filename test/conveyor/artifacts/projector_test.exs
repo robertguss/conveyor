@@ -88,6 +88,86 @@ defmodule Conveyor.Artifacts.ProjectorTest do
            )
   end
 
+  test "quarantines secret-bearing artifacts and blocks projection by default" do
+    backend = LocalDisk.new(root: tmp_root("secret-block"))
+    artifacts = store_secret_artifacts(backend)
+
+    assert Enum.all?(artifacts, & &1.quarantined)
+    assert Enum.all?(artifacts, &File.exists?(&1.redacted_blob_path))
+
+    assert {:error,
+            %{
+              category: "artifact_secret_detected",
+              action: "block_gate",
+              redaction_reports: reports
+            }} =
+             LocalDisk.project_run(backend, %{
+               run_id: "run-secret-blocked",
+               bundle_id: "bundle-secret-blocked",
+               artifacts: artifacts
+             })
+
+    assert length(reports) == 5
+
+    for artifact <- artifacts do
+      projected_path =
+        Path.join([
+          backend.root,
+          ".conveyor",
+          "runs",
+          "run-secret-blocked",
+          artifact.projection_path
+        ])
+
+      refute File.exists?(projected_path)
+    end
+  end
+
+  test "projects redacted artifacts only when policy allows redacted continuation" do
+    backend = LocalDisk.new(root: tmp_root("secret-redacted"))
+    artifacts = store_secret_artifacts(backend)
+
+    assert {:ok, projection} =
+             LocalDisk.project_run(backend, %{
+               run_id: "run-secret-redacted",
+               bundle_id: "bundle-secret-redacted",
+               artifacts: artifacts,
+               policy: %{allow_redacted_continuation: true}
+             })
+
+    assert projection.redaction_report.quarantined_count == 5
+    assert projection.redaction_report.finding_count >= 5
+
+    for artifact <- artifacts do
+      projected_path =
+        Path.join([
+          backend.root,
+          ".conveyor",
+          "runs",
+          "run-secret-redacted",
+          artifact.projection_path
+        ])
+
+      raw_bytes = File.read!(artifact.blob_path)
+      redacted_bytes = File.read!(projected_path)
+
+      assert raw_bytes =~ "FAKE_SECRET_"
+      assert redacted_bytes =~ "[REDACTED:"
+      refute redacted_bytes =~ "FAKE_SECRET_"
+      refute redacted_bytes == raw_bytes
+    end
+
+    assert length(projection.manifest["artifacts"]) == 5
+
+    for entry <- projection.manifest["artifacts"] do
+      assert entry["quarantined"] == true
+      assert entry["projection_mode"] == "redacted"
+      assert entry["export_policy"]["raw_export"] == "quarantined"
+      assert entry["raw_sha256"] != entry["redacted_sha256"]
+      assert entry["sha256"] == entry["redacted_sha256"]
+    end
+  end
+
   test "rejects projection paths that escape the run bundle root" do
     backend = LocalDisk.new(root: tmp_root("path-rejection"))
 
@@ -126,5 +206,33 @@ defmodule Conveyor.Artifacts.ProjectorTest do
       "conveyor-artifact-projector",
       "#{System.unique_integer([:positive])}-#{name}"
     ])
+  end
+
+  defp store_secret_artifacts(backend) do
+    secret_specs = [
+      {"prompt", "prompt", "prompts/task.md",
+       "prompt api_key=FAKE_SECRET_PROMPT_sk-1234567890abcdef"},
+      {"tool-output", "tool_output", "tool-output/codex.log",
+       "tool emitted token=FAKE_SECRET_TOOL_ghp_1234567890abcdefghijklmnop"},
+      {"command-log", "log", "logs/install.log",
+       "POSTGRES_PASSWORD=FAKE_SECRET_LOG_password-value"},
+      {"diff", "diff", "diffs/changes.diff", "+ secret: FAKE_SECRET_DIFF_AKIA1234567890ABCDEF"},
+      {"dossier", "dossier", "dossiers/summary.md",
+       "dossier password='FAKE_SECRET_DOSSIER_value'"}
+    ]
+
+    Enum.map(secret_specs, fn {key, role, path, bytes} ->
+      assert {:ok, artifact} =
+               LocalDisk.put_artifact(backend, %{
+                 artifact_key: key,
+                 artifact_role: role,
+                 projection_path: path,
+                 schema_version: "#{role}@1",
+                 content_type: "text/plain",
+                 bytes: bytes
+               })
+
+      artifact
+    end)
   end
 end
