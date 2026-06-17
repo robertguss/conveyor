@@ -13,6 +13,7 @@ defmodule Conveyor.PlanAudit do
   @finding_schema_version "conveyor.plan_audit.finding@1"
   @dimension_schema_version "conveyor.plan_audit.dimension_score@1"
   @next_action_schema_version "conveyor.plan_audit.next_action@1"
+  @matrix_schema_version "conveyor.plan_traceability_matrix@1"
   @cutline "TRACER_REQUIRED"
 
   @dimension_weights [
@@ -27,6 +28,8 @@ defmodule Conveyor.PlanAudit do
   ]
 
   @autonomy_ranks %{"L0" => 0, "L1" => 1, "L2" => 2, "L3" => 3, "L4" => 4}
+  @requirement_statuses ~w(ready open deferred out_of_scope)
+  @non_blocking_requirement_statuses ~w(deferred out_of_scope)
 
   def report_schema_version, do: @report_schema_version
   def finding_schema_version, do: @finding_schema_version
@@ -69,6 +72,7 @@ defmodule Conveyor.PlanAudit do
       contract_sha256: Map.get(import_report, :contract_sha256),
       normalized_contract_summary: Map.get(import_report, :normalized_contract_summary),
       plan_import_status: Map.get(import_report, :status),
+      traceability_matrix: contract && traceability_matrix(contract),
       dimensions: dimensions,
       findings: findings,
       next_actions: next_actions(findings),
@@ -170,6 +174,7 @@ defmodule Conveyor.PlanAudit do
   defp dimension_findings("testability", contract, source_path) do
     commands = list_field(contract, "verification_commands")
     command_ids = ids(commands, "command_id")
+    acceptance_ids = acceptance_ids(contract)
     slices = list_field(contract, "slices")
 
     command_findings =
@@ -188,6 +193,8 @@ defmodule Conveyor.PlanAudit do
       commands
       |> Enum.with_index()
       |> Enum.flat_map(fn {command, index} ->
+        acceptance_refs = list_field(command, "acceptance_refs")
+
         []
         |> maybe_finding(
           list_field(command, "command") == [],
@@ -197,6 +204,27 @@ defmodule Conveyor.PlanAudit do
           "verification command must include at least one argv token",
           "Populate the command array with the exact command the operator can rerun.",
           source_path
+        )
+        |> maybe_finding(
+          acceptance_refs == [],
+          "missing_verification_acceptance_refs",
+          "testability",
+          "$.verification_commands[#{index}].acceptance_refs",
+          "verification command must map to at least one acceptance criterion",
+          "Add acceptance_refs that point to ac_id values covered by this command.",
+          source_path
+        )
+        |> Kernel.++(
+          unknown_ref_findings(
+            acceptance_refs,
+            acceptance_ids,
+            "unknown_acceptance_ref",
+            "testability",
+            "$.verification_commands[#{index}].acceptance_refs",
+            "verification command references an acceptance criterion that is not declared",
+            "Declare the ac_id under a requirement or update the verification acceptance_refs entry.",
+            source_path
+          )
         )
       end)
 
@@ -237,14 +265,80 @@ defmodule Conveyor.PlanAudit do
     requirements = list_field(contract, "requirements")
     requirement_ids = ids(requirements, "requirement_id")
     slices = list_field(contract, "slices")
+    verified_acceptance_ids = verified_acceptance_ids(contract)
+
+    requirement_findings =
+      requirements
+      |> Enum.with_index()
+      |> Enum.flat_map(fn {requirement, index} ->
+        requirement_id = Map.get(requirement, "requirement_id")
+        status = requirement_status(requirement)
+
+        []
+        |> maybe_finding(
+          not source_ref?(requirement),
+          "missing_requirement_source_ref",
+          "requirement_traceability",
+          "$.requirements[#{index}].source_ref",
+          "each requirement must include a stable source section reference",
+          "Add source_ref.section so operators can trace the requirement back to plan text.",
+          source_path
+        )
+        |> maybe_finding(
+          blank?(status),
+          "missing_requirement_status",
+          "requirement_traceability",
+          "$.requirements[#{index}].status",
+          "each requirement must declare an explicit status",
+          "Set status to ready, open, deferred, or out_of_scope.",
+          source_path
+        )
+        |> maybe_finding(
+          not blank?(status) and status not in @requirement_statuses,
+          "unknown_requirement_status",
+          "requirement_traceability",
+          "$.requirements[#{index}].status",
+          "requirement status must be one of ready, open, deferred, or out_of_scope",
+          "Set status to a supported requirement lifecycle value.",
+          source_path
+        )
+        |> maybe_finding(
+          status == "open",
+          "open_requirement_blocks_handoff",
+          "requirement_traceability",
+          "$.requirements[#{index}].status",
+          "open requirements block handoff_ready",
+          "Resolve the requirement and set status to ready, or mark it deferred/out_of_scope.",
+          source_path
+        )
+        |> Kernel.++(
+          unverified_acceptance_findings(
+            requirement,
+            requirement_id,
+            index,
+            verified_acceptance_ids,
+            source_path
+          )
+        )
+      end)
 
     slice_findings =
       slices
       |> Enum.with_index()
       |> Enum.flat_map(fn {slice, index} ->
         refs = list_field(slice, "requirement_refs")
+        mapping_refs = slice_mapping_refs(slice)
 
         []
+        |> maybe_finding(
+          mapping_refs == [],
+          "orphan_slice",
+          "requirement_traceability",
+          "$.slices[#{index}]",
+          "slice must map to at least one requirement, decision, bug, or improvement",
+          "Add requirement_refs, decision_refs, bug_refs, or improvement_refs for this slice.",
+          source_path
+        )
         |> maybe_finding(
           refs == [],
           "missing_requirement_refs",
@@ -281,7 +375,8 @@ defmodule Conveyor.PlanAudit do
 
         []
         |> maybe_finding(
-          not blank?(requirement_id) and
+          active_requirement?(requirement) and
+            not blank?(requirement_id) and
             not MapSet.member?(covered_requirement_ids, requirement_id),
           "uncovered_requirement",
           "requirement_traceability",
@@ -292,7 +387,7 @@ defmodule Conveyor.PlanAudit do
         )
       end)
 
-    slice_findings ++ uncovered_findings
+    requirement_findings ++ slice_findings ++ uncovered_findings
   end
 
   defp dimension_findings("architecture_decisions", contract, source_path) do
@@ -506,6 +601,94 @@ defmodule Conveyor.PlanAudit do
     end)
   end
 
+  defp traceability_matrix(contract) do
+    requirements = list_field(contract, "requirements")
+    slices = list_field(contract, "slices")
+    commands = list_field(contract, "verification_commands")
+    acceptance_to_requirement = acceptance_to_requirement(requirements)
+    slice_ids_by_requirement = slice_ids_by_requirement(slices)
+    command_ids_by_acceptance = command_ids_by_acceptance(commands)
+
+    %{
+      schema_version: @matrix_schema_version,
+      requirement_rows:
+        Enum.map(requirements, fn requirement ->
+          requirement_id = Map.get(requirement, "requirement_id")
+          acceptance_ids = requirement_acceptance_ids(requirement)
+
+          %{
+            requirement_id: requirement_id,
+            status: requirement_status(requirement),
+            source_ref: Map.get(requirement, "source_ref"),
+            acceptance_ids: acceptance_ids,
+            slice_ids: Map.get(slice_ids_by_requirement, requirement_id, []),
+            verification_command_ids:
+              acceptance_ids
+              |> Enum.flat_map(&Map.get(command_ids_by_acceptance, &1, []))
+              |> stable_uniq(),
+            deferred: requirement_status(requirement) == "deferred",
+            out_of_scope: requirement_status(requirement) == "out_of_scope"
+          }
+        end),
+      slice_rows:
+        Enum.map(slices, fn slice ->
+          %{
+            slice_id: Map.get(slice, "slice_id"),
+            requirement_refs: list_field(slice, "requirement_refs"),
+            decision_refs: list_field(slice, "decision_refs"),
+            bug_refs: list_field(slice, "bug_refs"),
+            improvement_refs: list_field(slice, "improvement_refs"),
+            verification_refs: list_field(slice, "verification_refs"),
+            orphan: slice_mapping_refs(slice) == []
+          }
+        end),
+      verification_rows:
+        Enum.map(commands, fn command ->
+          acceptance_refs = list_field(command, "acceptance_refs")
+
+          %{
+            command_id: Map.get(command, "command_id"),
+            acceptance_refs: acceptance_refs,
+            requirement_ids:
+              acceptance_refs
+              |> Enum.map(&Map.get(acceptance_to_requirement, &1))
+              |> Enum.reject(&blank?/1)
+              |> stable_uniq()
+          }
+        end)
+    }
+  end
+
+  defp unverified_acceptance_findings(
+         requirement,
+         requirement_id,
+         requirement_index,
+         verified_acceptance_ids,
+         source_path
+       ) do
+    if active_requirement?(requirement) do
+      requirement
+      |> list_field("acceptance_criteria")
+      |> Enum.with_index()
+      |> Enum.flat_map(fn {criterion, criterion_index} ->
+        ac_id = Map.get(criterion, "ac_id")
+
+        []
+        |> maybe_finding(
+          not blank?(ac_id) and not MapSet.member?(verified_acceptance_ids, ac_id),
+          "unverified_acceptance_criterion",
+          "requirement_traceability",
+          "$.requirements[#{requirement_index}].acceptance_criteria[#{criterion_index}].ac_id",
+          "acceptance criterion is not covered by any verification command: #{ac_id}",
+          "Add #{ac_id} to a verification command acceptance_refs list for #{requirement_id}.",
+          source_path
+        )
+      end)
+    else
+      []
+    end
+  end
+
   defp maybe_finding(findings, false, _code, _dimension, _path, _message, _action, _source_path),
     do: findings
 
@@ -547,6 +730,88 @@ defmodule Conveyor.PlanAudit do
     |> Enum.reject(&blank?/1)
     |> MapSet.new()
   end
+
+  defp acceptance_ids(contract) do
+    contract
+    |> list_field("requirements")
+    |> acceptance_to_requirement()
+    |> Map.keys()
+    |> MapSet.new()
+  end
+
+  defp acceptance_to_requirement(requirements) do
+    requirements
+    |> Enum.flat_map(fn requirement ->
+      requirement_id = Map.get(requirement, "requirement_id")
+
+      requirement
+      |> requirement_acceptance_ids()
+      |> Enum.map(&{&1, requirement_id})
+    end)
+    |> Map.new()
+  end
+
+  defp requirement_acceptance_ids(requirement) do
+    requirement
+    |> list_field("acceptance_criteria")
+    |> Enum.map(&Map.get(&1, "ac_id"))
+    |> Enum.reject(&blank?/1)
+  end
+
+  defp verified_acceptance_ids(contract) do
+    contract
+    |> list_field("verification_commands")
+    |> Enum.flat_map(&list_field(&1, "acceptance_refs"))
+    |> MapSet.new()
+  end
+
+  defp slice_ids_by_requirement(slices) do
+    slices
+    |> Enum.reduce(%{}, fn slice, by_requirement ->
+      slice_id = Map.get(slice, "slice_id")
+
+      slice
+      |> list_field("requirement_refs")
+      |> Enum.reject(&blank?/1)
+      |> Enum.reduce(by_requirement, fn requirement_id, acc ->
+        Map.update(acc, requirement_id, [slice_id], &stable_uniq(&1 ++ [slice_id]))
+      end)
+    end)
+  end
+
+  defp command_ids_by_acceptance(commands) do
+    commands
+    |> Enum.reduce(%{}, fn command, by_acceptance ->
+      command_id = Map.get(command, "command_id")
+
+      command
+      |> list_field("acceptance_refs")
+      |> Enum.reject(&blank?/1)
+      |> Enum.reduce(by_acceptance, fn ac_id, acc ->
+        Map.update(acc, ac_id, [command_id], &stable_uniq(&1 ++ [command_id]))
+      end)
+    end)
+  end
+
+  defp slice_mapping_refs(slice) do
+    ["requirement_refs", "decision_refs", "bug_refs", "improvement_refs"]
+    |> Enum.flat_map(&list_field(slice, &1))
+    |> Enum.reject(&blank?/1)
+  end
+
+  defp source_ref?(requirement) do
+    case Map.get(requirement, "source_ref") do
+      %{"section" => section} -> not blank?(section)
+      _other -> false
+    end
+  end
+
+  defp active_requirement?(requirement),
+    do: requirement_status(requirement) not in @non_blocking_requirement_statuses
+
+  defp requirement_status(requirement), do: string_field(requirement, "status")
+
+  defp stable_uniq(values), do: values |> Enum.reject(&blank?/1) |> Enum.uniq()
 
   defp list_field(map, key) when is_map(map) do
     case Map.get(map, key) do

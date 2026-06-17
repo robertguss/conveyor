@@ -24,6 +24,35 @@ defmodule Conveyor.PlanAuditTest do
 
     assert Enum.all?(report.dimensions, &(&1.status == "pass"))
 
+    assert %{
+             schema_version: "conveyor.plan_traceability_matrix@1",
+             requirement_rows: [
+               %{
+                 requirement_id: "REQ-001",
+                 status: "ready",
+                 source_ref: %{"section" => "Requirements / Complete task endpoint"},
+                 acceptance_ids: ["AC-001"],
+                 slice_ids: ["SLICE-001"],
+                 verification_command_ids: ["VERIFY-001"]
+               },
+               %{
+                 requirement_id: "REQ-002",
+                 status: "ready",
+                 acceptance_ids: ["AC-002"],
+                 slice_ids: ["SLICE-002"],
+                 verification_command_ids: ["VERIFY-001", "VERIFY-002"]
+               }
+             ],
+             slice_rows: [
+               %{slice_id: "SLICE-001", orphan: false},
+               %{slice_id: "SLICE-002", orphan: false}
+             ],
+             verification_rows: [
+               %{command_id: "VERIFY-001", acceptance_refs: ["AC-001", "AC-002"]},
+               %{command_id: "VERIFY-002", acceptance_refs: ["AC-002"]}
+             ]
+           } = report.traceability_matrix
+
     json = report |> Jason.encode!() |> Jason.decode!()
     assert json["schema_version"] == "conveyor.plan_audit.report@1"
     assert json["score"] == 100
@@ -67,6 +96,98 @@ defmodule Conveyor.PlanAuditTest do
     report = audit_plan(contract)
 
     assert_blocking_finding(report, "requirement_traceability", "unknown_requirement_ref")
+  end
+
+  test "orphan requirements fail audit and appear in the traceability matrix" do
+    contract =
+      plan_contract("plan-audit-orphan-requirement")
+      |> put_in(["slices", Access.at(1), "requirement_refs"], [])
+
+    report = audit_plan(contract)
+
+    assert_blocking_finding(report, "requirement_traceability", "uncovered_requirement")
+
+    assert Enum.any?(report.traceability_matrix.requirement_rows, fn row ->
+             row.requirement_id == "REQ-002" and row.slice_ids == []
+           end)
+  end
+
+  test "orphan slices fail audit and appear in the traceability matrix" do
+    contract =
+      plan_contract("plan-audit-orphan-slice")
+      |> put_in(["slices", Access.at(0), "requirement_refs"], [])
+      |> put_in(["slices", Access.at(0), "decision_refs"], [])
+
+    report = audit_plan(contract)
+
+    assert_blocking_finding(report, "requirement_traceability", "orphan_slice")
+
+    assert Enum.any?(report.traceability_matrix.slice_rows, fn row ->
+             row.slice_id == "SLICE-001" and row.orphan == true
+           end)
+  end
+
+  test "open requirements block handoff_ready" do
+    contract =
+      plan_contract("plan-audit-open-requirement")
+      |> put_in(["requirements", Access.at(0), "status"], "open")
+
+    report = audit_plan(contract)
+
+    assert_blocking_finding(report, "requirement_traceability", "open_requirement_blocks_handoff")
+  end
+
+  test "deferred and out_of_scope requirements are explicit in the matrix without blocking" do
+    deferred = %{
+      "requirement_id" => "REQ-003",
+      "title" => "Future search filter",
+      "source_ref" => %{"section" => "Deferred / Future search filter"},
+      "status" => "deferred",
+      "acceptance_criteria" => [
+        %{"ac_id" => "AC-003", "text" => "Search filtering is deferred to a later slice."}
+      ]
+    }
+
+    out_of_scope = %{
+      "requirement_id" => "REQ-004",
+      "title" => "Production deployment",
+      "source_ref" => %{"section" => "Out of scope / Production deployment"},
+      "status" => "out_of_scope",
+      "acceptance_criteria" => [
+        %{"ac_id" => "AC-004", "text" => "Production deployment is explicitly out of scope."}
+      ]
+    }
+
+    contract =
+      plan_contract("plan-audit-deferred-requirements")
+      |> Map.update!("requirements", &(&1 ++ [deferred, out_of_scope]))
+
+    report = audit_plan(contract)
+
+    assert report.status == "handoff_ready"
+    assert report.handoff_ready == true
+    refute Enum.any?(report.findings, &(&1.finding_code == "uncovered_requirement"))
+    refute Enum.any?(report.findings, &(&1.finding_code == "unverified_acceptance_criterion"))
+
+    assert Enum.any?(report.traceability_matrix.requirement_rows, fn row ->
+             row.requirement_id == "REQ-003" and row.status == "deferred" and
+               row.deferred == true and row.slice_ids == []
+           end)
+
+    assert Enum.any?(report.traceability_matrix.requirement_rows, fn row ->
+             row.requirement_id == "REQ-004" and row.status == "out_of_scope" and
+               row.out_of_scope == true and row.slice_ids == []
+           end)
+  end
+
+  test "verification commands must map to acceptance criteria" do
+    contract =
+      plan_contract("plan-audit-unmapped-test")
+      |> put_in(["verification_commands", Access.at(0), "acceptance_refs"], [])
+
+    report = audit_plan(contract)
+
+    assert_blocking_finding(report, "testability", "missing_verification_acceptance_refs")
   end
 
   test "missing risk policy produces a stable blocking finding" do
@@ -147,6 +268,8 @@ defmodule Conveyor.PlanAuditTest do
         %{
           "requirement_id" => "REQ-001",
           "title" => "Complete task endpoint",
+          "source_ref" => %{"section" => "Requirements / Complete task endpoint"},
+          "status" => "ready",
           "acceptance_criteria" => [
             %{
               "ac_id" => "AC-001",
@@ -157,6 +280,8 @@ defmodule Conveyor.PlanAuditTest do
         %{
           "requirement_id" => "REQ-002",
           "title" => "Preserve list task behavior",
+          "source_ref" => %{"section" => "Requirements / Preserve list task behavior"},
+          "status" => "ready",
           "acceptance_criteria" => [
             %{
               "ac_id" => "AC-002",
@@ -166,8 +291,16 @@ defmodule Conveyor.PlanAuditTest do
         }
       ],
       "verification_commands" => [
-        %{"command_id" => "VERIFY-001", "command" => ["python3", "-m", "pytest"]},
-        %{"command_id" => "VERIFY-002", "command" => ["mix", "test"]}
+        %{
+          "command_id" => "VERIFY-001",
+          "acceptance_refs" => ["AC-001", "AC-002"],
+          "command" => ["python3", "-m", "pytest"]
+        },
+        %{
+          "command_id" => "VERIFY-002",
+          "acceptance_refs" => ["AC-002"],
+          "command" => ["mix", "test"]
+        }
       ],
       "decisions" => [
         %{

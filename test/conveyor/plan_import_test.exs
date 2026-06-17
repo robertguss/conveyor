@@ -152,21 +152,32 @@ defmodule Conveyor.PlanImportTest do
     requirements:
       - requirement_id: REQ-001
         title: Complete task endpoint
+        source_ref:
+          section: Requirements / Complete task endpoint
+        status: ready
         acceptance_criteria:
           - ac_id: AC-001
             text: Tasks can be marked complete and the state is visible in list responses.
       - requirement_id: REQ-002
         title: Preserve list task behavior
+        source_ref:
+          section: Requirements / Preserve list task behavior
+        status: ready
         acceptance_criteria:
           - ac_id: AC-002
             text: Existing list behavior remains stable after completion support lands.
     verification_commands:
       - command_id: VERIFY-001
+        acceptance_refs:
+          - AC-001
+          - AC-002
         command:
           - python3
           - "-m"
           - pytest
       - command_id: VERIFY-002
+        acceptance_refs:
+          - AC-002
         command:
           - mix
           - test
@@ -233,6 +244,8 @@ defmodule Conveyor.PlanImportTest do
         %{
           "requirement_id" => "REQ-001",
           "title" => "Complete task endpoint",
+          "source_ref" => %{"section" => "Requirements / Complete task endpoint"},
+          "status" => "ready",
           "acceptance_criteria" => [
             %{
               "ac_id" => "AC-001",
@@ -242,7 +255,11 @@ defmodule Conveyor.PlanImportTest do
         }
       ],
       "verification_commands" => [
-        %{"command_id" => "VERIFY-001", "command" => ["mix", "test"]}
+        %{
+          "command_id" => "VERIFY-001",
+          "acceptance_refs" => ["AC-001"],
+          "command" => ["mix", "test"]
+        }
       ],
       "decisions" => [
         %{

@@ -13,6 +13,10 @@
     {
       "requirement_id": "REQ-001",
       "title": "Run sample tracer",
+      "source_ref": {
+        "section": "Requirements / Run sample tracer"
+      },
+      "status": "ready",
       "acceptance_criteria": [
         {
           "ac_id": "AC-001",
@@ -24,6 +28,9 @@
   "verification_commands": [
     {
       "command_id": "VERIFY-001",
+      "acceptance_refs": [
+        "AC-001"
+      ],
       "command": [
         "mix",
         "test"
