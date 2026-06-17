@@ -8,6 +8,7 @@ defmodule Conveyor.ToolExecutor do
   structured transcript for every attempt.
   """
 
+  alias Conveyor.Domain.Incident
   alias Conveyor.Domain.PayloadHelpers
   alias Conveyor.Domain.ToolInvocation
   alias Conveyor.Policy.CommandSpec
@@ -87,11 +88,21 @@ defmodule Conveyor.ToolExecutor do
           {:error, output, exit_code} -> {to_string(output), exit_code}
           {output, exit_code} -> {to_string(output), exit_code}
         end
-      rescue
-        exception -> {Exception.message(exception), nil}
+      catch
+        kind, reason ->
+          exception = Exception.normalize(kind, reason, __STACKTRACE__)
+          {Exception.message(exception), nil}
       end
 
-    status = if exit_code == 0, do: "completed", else: "failed"
+    exposed_secret_keys = exposed_secret_keys(output, command_decision, opts)
+    output = redact_secrets(output, command_decision, opts)
+
+    status =
+      cond do
+        exposed_secret_keys != [] -> "failed"
+        exit_code == 0 -> "completed"
+        true -> "failed"
+      end
 
     result =
       build_result(command_decision, policy_decision, opts, %{
@@ -99,7 +110,8 @@ defmodule Conveyor.ToolExecutor do
         output: output,
         exit_code: exit_code,
         started_at: started_at,
-        started_native_ms: started_native_ms
+        started_native_ms: started_native_ms,
+        exposed_secret_keys: exposed_secret_keys
       })
 
     if status == "completed", do: {:ok, result}, else: {:error, result}
@@ -137,6 +149,19 @@ defmodule Conveyor.ToolExecutor do
     tool_invocation_id = tool_invocation_id(command_decision, opts)
     output_sha256 = PayloadHelpers.sha256_binary(run.output)
     output_refs = output_refs(tool_invocation_id, run.status, run.output)
+
+    incidents =
+      incident_payloads(
+        command_decision,
+        policy_decision,
+        opts,
+        Map.put(run, :completed_at, completed_at),
+        tool_invocation_id,
+        output_refs
+      )
+
+    incident_refs = incident_refs(incidents)
+    outcome = outcome_summary(incidents)
 
     transcript =
       transcript(%{
@@ -183,12 +208,15 @@ defmodule Conveyor.ToolExecutor do
         metadata: %{
           "matrix_ref" => "conveyor-quality-ci-evals-vmr.13",
           "policy_controlled" => true,
-          "output_bytes" => byte_size(run.output)
+          "output_bytes" => byte_size(run.output),
+          "incident_refs" => incident_refs,
+          "outcome" => outcome
         }
       })
 
     attrs = ToolInvocation.create_attrs!(payload)
     record = maybe_persist(attrs, opts)
+    incident_records = maybe_persist_incidents(incidents, opts)
 
     %{
       status: run.status,
@@ -199,7 +227,10 @@ defmodule Conveyor.ToolExecutor do
       transcript: transcript,
       output_sha256: output_sha256,
       output_refs: output_refs,
-      policy_decision: policy_decision
+      policy_decision: policy_decision,
+      incidents: incidents,
+      incident_records: incident_records,
+      outcome: outcome
     }
   end
 
@@ -212,6 +243,22 @@ defmodule Conveyor.ToolExecutor do
         {:error, error} ->
           raise ArgumentError, "failed to persist ToolInvocation: #{inspect(error)}"
       end
+    end
+  end
+
+  defp maybe_persist_incidents(incidents, opts) do
+    if Keyword.get(opts, :persist_incidents?, Keyword.get(opts, :persist?, true)) do
+      Enum.map(incidents, fn incident ->
+        case Ash.create(Incident, Incident.create_attrs!(incident), action: :create) do
+          {:ok, record} ->
+            record
+
+          {:error, error} ->
+            raise ArgumentError, "failed to persist Incident: #{inspect(error)}"
+        end
+      end)
+    else
+      []
     end
   end
 
@@ -340,6 +387,241 @@ defmodule Conveyor.ToolExecutor do
     %{"combined" => "artifact://tool-invocations/#{tool_invocation_id}/combined-output"}
   end
 
+  defp incident_payloads(
+         command_decision,
+         policy_decision,
+         opts,
+         run,
+         tool_invocation_id,
+         output_refs
+       ) do
+    policy_findings = policy_incident_findings(policy_decision, run.status)
+    secret_findings = secret_exposure_findings(Map.get(run, :exposed_secret_keys, []))
+    sandbox_findings = sandbox_failure_findings(run, secret_findings)
+
+    (policy_findings ++ secret_findings ++ sandbox_findings)
+    |> Enum.with_index(1)
+    |> Enum.map(fn {finding, index} ->
+      category = incident_category(finding)
+      severity = incident_severity(category, finding)
+
+      Incident.build!(%{
+        incident_id: "#{tool_invocation_id}-incident-#{index}",
+        run_attempt_id: required_opt!(opts, :run_attempt_id),
+        station_run_id: required_opt!(opts, :station_run_id),
+        tool_invocation_id: tool_invocation_id,
+        category: category,
+        severity: severity,
+        description: incident_description(finding),
+        status: "open",
+        occurred_at: Map.get(run, :completed_at, DateTime.utc_now()),
+        evidence_refs: incident_evidence_refs(tool_invocation_id, command_decision, output_refs),
+        finding: finding,
+        policy_decision: policy_decision,
+        command_ref: command_ref(command_decision),
+        outcome: incident_outcome(category, severity),
+        metadata: %{
+          "matrix_ref" => "conveyor-quality-ci-evals-vmr.13",
+          "policy_controlled_stop" => high_severity?(severity)
+        }
+      })
+    end)
+  end
+
+  defp policy_incident_findings(policy_decision, "blocked") do
+    case get_field(policy_decision, :findings, []) do
+      [] ->
+        [
+          %{
+            "code" => "policy_execution_blocked",
+            "message" => "policy blocked command execution",
+            "category" => "runtime_policy",
+            "severity" => "error",
+            "action" => "block_execution"
+          }
+        ]
+
+      findings ->
+        Enum.map(findings, &PayloadHelpers.normalize_map/1)
+    end
+  end
+
+  defp policy_incident_findings(_policy_decision, _status), do: []
+
+  defp secret_exposure_findings([]), do: []
+
+  defp secret_exposure_findings(exposed_keys) do
+    if exposed_keys == [] do
+      []
+    else
+      [
+        %{
+          "code" => "secret_output_exposure_detected",
+          "message" => "command output contained a value from declared secret environment keys",
+          "category" => "secret_exposure",
+          "severity" => "critical",
+          "env_keys" => exposed_keys,
+          "action" => "stop_run_attempt",
+          "violation_class" => "secret_exposure"
+        }
+      ]
+    end
+  end
+
+  defp sandbox_failure_findings(%{status: "failed"} = run, []) do
+    [
+      %{
+        "code" => "sandbox_command_failed",
+        "message" => "sandboxed command failed before producing an accepted result",
+        "category" => "sandbox_failure",
+        "severity" => "high",
+        "exit_code" => run.exit_code,
+        "action" => "stop_run_attempt",
+        "violation_class" => "sandbox_failure"
+      }
+    ]
+  end
+
+  defp sandbox_failure_findings(_run, _secret_findings), do: []
+
+  defp exposed_secret_keys(output, command_decision, opts) do
+    command_decision
+    |> get_field(:env_keys, [])
+    |> Enum.filter(&secret_exposed?(output, &1, opts))
+  end
+
+  defp redact_secrets(output, command_decision, opts) do
+    command_decision
+    |> get_field(:env_keys, [])
+    |> Enum.reduce(output, fn key, redacted ->
+      case secret_value(key, opts) do
+        nil -> redacted
+        value -> String.replace(redacted, value, "[REDACTED:#{key}]")
+      end
+    end)
+  end
+
+  defp secret_exposed?(output, key, opts) do
+    case secret_value(key, opts) do
+      nil -> false
+      value -> String.contains?(output, value)
+    end
+  end
+
+  defp secret_value(key, opts) do
+    env = Keyword.get(opts, :env, %{})
+
+    case PayloadHelpers.get(env, key) do
+      value when is_binary(value) and byte_size(value) >= 4 -> value
+      value when not is_nil(value) -> value |> to_string() |> usable_secret_value()
+      _missing -> nil
+    end
+  end
+
+  defp usable_secret_value(value) when byte_size(value) >= 4, do: value
+  defp usable_secret_value(_value), do: nil
+
+  defp incident_category(finding) do
+    code = finding |> get_field(:code, "") |> to_string()
+    explicit = get_field(finding, :violation_class)
+    denylist_class = finding |> get_field(:denylist_class, "") |> to_string()
+    path = finding |> get_field(:path, "") |> to_string()
+
+    cond do
+      is_binary(explicit) and explicit != "" ->
+        explicit
+
+      code == "network_egress_blocked" ->
+        "suspicious_network_access"
+
+      String.contains?(code, "dangerous") or String.contains?(denylist_class, "dangerous") ->
+        "dangerous_command"
+
+      String.contains?(path, "env_keys") ->
+        "suspicious_environment_access"
+
+      true ->
+        "policy_violation"
+    end
+  end
+
+  defp incident_severity("secret_exposure", _finding), do: "critical"
+  defp incident_severity("dangerous_command", _finding), do: "critical"
+  defp incident_severity("suspicious_network_access", _finding), do: "high"
+  defp incident_severity("suspicious_environment_access", _finding), do: "high"
+  defp incident_severity("sandbox_failure", _finding), do: "high"
+
+  defp incident_severity(_category, finding),
+    do: finding |> get_field(:severity, "high") |> to_string()
+
+  defp incident_description(finding) do
+    finding
+    |> get_field(:message, "policy-controlled execution incident")
+    |> to_string()
+  end
+
+  defp incident_evidence_refs(tool_invocation_id, command_decision, output_refs) do
+    %{
+      "tool_invocation" => "tool-invocation://#{tool_invocation_id}",
+      "command" => command_ref(command_decision),
+      "artifacts" => Map.values(output_refs)
+    }
+  end
+
+  defp incident_outcome("sandbox_failure", severity) do
+    %{
+      "stop_run" => high_severity?(severity),
+      "run_attempt" => %{
+        "transition" => "fail",
+        "state" => "failed",
+        "status" => "failed",
+        "failure_category" => "sandbox_failure"
+      },
+      "slice" => %{
+        "transition" => nil,
+        "state" => "in_progress",
+        "status" => "run_failed",
+        "failure_category" => "sandbox_failure"
+      }
+    }
+  end
+
+  defp incident_outcome(category, severity) do
+    %{
+      "stop_run" => high_severity?(severity),
+      "run_attempt" => %{
+        "transition" => "fail",
+        "state" => "failed",
+        "status" => "failed",
+        "failure_category" => category
+      },
+      "slice" => %{
+        "transition" => "block",
+        "state" => "blocked",
+        "status" => "policy_blocked",
+        "failure_category" => category
+      }
+    }
+  end
+
+  defp incident_refs(incidents) do
+    Enum.map(incidents, &"incident://#{Map.fetch!(&1, "incident_id")}")
+  end
+
+  defp outcome_summary([]), do: nil
+
+  defp outcome_summary(incidents) do
+    incidents
+    |> Enum.map(&Map.fetch!(&1, "outcome"))
+    |> Enum.find(& &1["stop_run"])
+  end
+
+  defp high_severity?(severity), do: severity in ["critical", "high", "error"]
+
+  defp get_field(map, key, default \\ nil) when is_map(map) do
+    Map.get(map, key, Map.get(map, to_string(key), default))
+  end
+
   defp tool_invocation_id(command_decision, opts) do
     Keyword.get(opts, :tool_invocation_id) ||
       "tool-invocation-#{Map.get(command_decision, :command_id, "command")}-#{System.unique_integer([:positive])}"
@@ -349,9 +631,10 @@ defmodule Conveyor.ToolExecutor do
     do: "cmd://#{Map.get(command_decision, :command_id, "command")}"
 
   defp required_opt!(opts, key) do
-    Keyword.fetch!(opts, key)
-  rescue
-    KeyError -> raise ArgumentError, "missing required ToolExecutor option: #{key}"
+    case Keyword.fetch(opts, key) do
+      {:ok, value} -> value
+      :error -> raise ArgumentError, "missing required ToolExecutor option: #{key}"
+    end
   end
 
   defp profile_name(opts),

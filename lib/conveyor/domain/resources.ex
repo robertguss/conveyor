@@ -3501,6 +3501,34 @@ end
 
 defmodule Conveyor.Domain.Incident do
   use Conveyor.Domain.ActiveResource, table: "incidents"
+
+  @schema_version "conveyor.incident@1"
+
+  def build!(attrs) when is_map(attrs) do
+    Conveyor.Domain.ExecutionPayload.build!(
+      @schema_version,
+      attrs,
+      [:incident_id, :run_attempt_id, :category, :severity, :description],
+      %{status: "open"},
+      [
+        :station_run_id,
+        :tool_invocation_id,
+        :occurred_at,
+        :evidence_refs,
+        :finding,
+        :policy_decision,
+        :command_ref,
+        :outcome,
+        :metadata
+      ]
+    )
+  end
+
+  def create_attrs!(attrs) when is_map(attrs) do
+    attrs
+    |> build!()
+    |> Conveyor.Domain.ExecutionPayload.create_attrs!(:incident_id, :category)
+  end
 end
 
 defmodule Conveyor.Domain.StationEffect do

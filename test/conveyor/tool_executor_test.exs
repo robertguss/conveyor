@@ -2,6 +2,7 @@ defmodule Conveyor.ToolExecutorTest do
   use ExUnit.Case, async: false
 
   alias Conveyor.Domain.PayloadHelpers
+  alias Conveyor.Domain.Incident
   alias Conveyor.Repo
   alias Conveyor.ToolExecutor
 
@@ -35,6 +36,9 @@ defmodule Conveyor.ToolExecutorTest do
     assert payload["output_sha256"] == PayloadHelpers.sha256_binary("conveyor-ok\n")
     assert payload["artifact_refs"] == [payload["output_refs"]["combined"]]
     refute inspect(payload) =~ "secret-value"
+    assert result.incidents == []
+    assert result.incident_records == []
+    assert result.outcome == nil
 
     assert result.tool_invocation_record.payload["tool_invocation_id"] ==
              payload["tool_invocation_id"]
@@ -87,6 +91,55 @@ defmodule Conveyor.ToolExecutorTest do
            end)
 
     assert List.last(result.transcript["events"])["type"] == "pre_exec_block"
+
+    assert [incident] = result.incidents
+    assert incident["schema_version"] == "conveyor.incident@1"
+    assert incident["category"] == "dangerous_command"
+    assert incident["severity"] == "critical"
+    assert incident["status"] == "open"
+    assert incident["run_attempt_id"] == "run-attempt-tool-executor"
+    assert incident["station_run_id"] == "station-run-tool-executor"
+    assert incident["tool_invocation_id"] == result.tool_invocation["tool_invocation_id"]
+    assert incident["evidence_refs"]["tool_invocation"] =~ "tool-invocation://"
+    assert incident["evidence_refs"]["command"] == "cmd://dangerous-git"
+    assert incident["outcome"]["stop_run"] == true
+    assert incident["outcome"]["run_attempt"]["state"] == "failed"
+    assert incident["outcome"]["slice"]["status"] == "policy_blocked"
+    assert result.outcome == incident["outcome"]
+
+    assert [incident_record] = result.incident_records
+    assert incident_record.payload["incident_id"] == incident["incident_id"]
+  end
+
+  test "creates suspicious network incidents for blocked egress" do
+    root = tmp_root("network-blocked")
+    File.mkdir_p!(root)
+    parent = self()
+
+    command =
+      echo_command()
+      |> Map.put("network", "controlled")
+
+    assert {:error, result} =
+             ToolExecutor.execute(
+               command,
+               base_opts(root,
+                 target_host: "postgres",
+                 runner: fn _command, _env, _opts ->
+                   send(parent, :runner_called)
+                   {"should-not-run", 0}
+                 end
+               )
+             )
+
+    refute_received :runner_called
+
+    assert [incident] = result.incidents
+    assert incident["category"] == "suspicious_network_access"
+    assert incident["severity"] == "high"
+    assert incident["finding"]["code"] == "network_egress_blocked"
+    assert incident["finding"]["network_decision"]["target_class"] == "internal"
+    assert incident["outcome"]["slice"]["status"] == "policy_blocked"
   end
 
   test "marks observe-only adapters as capped and does not execute" do
@@ -121,6 +174,32 @@ defmodule Conveyor.ToolExecutorTest do
     assert List.last(result.transcript["events"])["type"] == "observe_only_cap"
   end
 
+  test "redacts leaked secret output and records a critical incident" do
+    root = tmp_root("secret-leak")
+    File.mkdir_p!(root)
+
+    assert {:error, result} =
+             ToolExecutor.execute(
+               echo_command(),
+               base_opts(root,
+                 env: %{"SAFE_TOKEN" => "secret-value"},
+                 runner: fn _command, _env, _opts -> {"token=secret-value", 0} end
+               )
+             )
+
+    assert result.status == "failed"
+    assert result.tool_invocation["tool_status"] == "failed"
+    refute inspect(result.tool_invocation) =~ "secret-value"
+    assert result.transcript["output"]["preview"] == "token=[REDACTED:SAFE_TOKEN]"
+
+    assert [incident] = result.incidents
+    assert incident["category"] == "secret_exposure"
+    assert incident["severity"] == "critical"
+    assert incident["finding"]["env_keys"] == ["SAFE_TOKEN"]
+    assert incident["outcome"]["run_attempt"]["state"] == "failed"
+    assert incident["outcome"]["slice"]["status"] == "policy_blocked"
+  end
+
   test "records nonzero command exits with output digest and transcript" do
     root = tmp_root("failed")
     File.mkdir_p!(root)
@@ -148,6 +227,40 @@ defmodule Conveyor.ToolExecutorTest do
     assert result.output_sha256 == PayloadHelpers.sha256_binary("failed")
     assert result.transcript["output"]["bytes"] == 6
     assert List.last(result.transcript["events"])["type"] == "process_exit"
+
+    assert [incident] = result.incidents
+    assert incident["category"] == "sandbox_failure"
+    assert incident["severity"] == "high"
+    assert incident["evidence_refs"]["artifacts"] == [result.output_refs["combined"]]
+    assert incident["outcome"]["run_attempt"]["state"] == "failed"
+    assert incident["outcome"]["slice"]["status"] == "run_failed"
+    assert incident["outcome"]["slice"]["transition"] == nil
+  end
+
+  test "Incident build contract requires operational fields" do
+    payload =
+      Incident.build!(%{
+        incident_id: "incident-contract-001",
+        run_attempt_id: "run-attempt-contract",
+        station_run_id: "station-run-contract",
+        category: "policy_violation",
+        severity: "high",
+        description: "policy blocked command execution",
+        evidence_refs: %{"tool_invocation" => "tool-invocation://contract"},
+        outcome: %{
+          "run_attempt" => %{"state" => "failed"},
+          "slice" => %{"status" => "policy_blocked"}
+        }
+      })
+
+    assert payload["schema_version"] == "conveyor.incident@1"
+    assert payload["status"] == "open"
+    assert payload["evidence_refs"]["tool_invocation"] == "tool-invocation://contract"
+    assert payload["outcome"]["slice"]["status"] == "policy_blocked"
+
+    attrs = Incident.create_attrs!(payload)
+    assert attrs.external_id == "incident-contract-001"
+    assert attrs.name == "policy_violation"
   end
 
   defp echo_command do
