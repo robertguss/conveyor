@@ -147,6 +147,105 @@ defmodule Conveyor.GateEngineTest do
            end)
   end
 
+  test "reviewer-on-dossier output stores actor separation, digest, and rubric metadata" do
+    review = GateEngine.build_review!(base_review_attrs())
+
+    assert %{
+             "schema_version" => "conveyor.review@1",
+             "review_id" => "review-001",
+             "run_attempt_id" => "run-attempt-001",
+             "station_run_id" => "station-run-001",
+             "reviewer_profile_id" => "reviewer-profile-001",
+             "decision" => "approve",
+             "evidence_refs" => [dossier_digest],
+             "metadata" => %{
+               "schema_version" => "conveyor.reviewer_on_dossier@1",
+               "category" => "reviewer_on_dossier",
+               "dossier_digest" => dossier_digest,
+               "rubric_version" => "review-rubric@1",
+               "reviewer_session_id" => "reviewer-session-001",
+               "implementer_profile_id" => "implementer-profile-001",
+               "implementer_session_id" => "implementer-session-001",
+               "recommendation" => "gate",
+               "summary" => "Recorded dossier evidence supports the requested change.",
+               "checks" => [%{"check_id" => "CHK-001", "status" => "pass"}],
+               "actor_separation" => %{
+                 "reviewer_profile_distinct" => true,
+                 "reviewer_session_distinct" => true
+               }
+             }
+           } = review
+
+    composition =
+      base_attrs()
+      |> Map.put(:review_id, review["review_id"])
+      |> Map.put(:stages, [
+        %{
+          stage_key: "review",
+          status: "pass",
+          required: true,
+          details: %{
+            expected_dossier_digest: dossier_digest,
+            review: review
+          }
+        }
+      ])
+      |> GateEngine.compose!()
+
+    assert composition.decision == "pass"
+    assert composition.failure_findings == []
+    assert composition.gate_result["review_id"] == "review-001"
+
+    assert [%{"stage_key" => "review", "passed" => true, "findings" => []}] =
+             composition.gate_result["stage_results"]
+  end
+
+  test "malformed or non-separated reviewer output fails before gate use" do
+    assert_raise ArgumentError, "reviewer output checks must be a non-empty list", fn ->
+      base_review_attrs()
+      |> put_in([:output, :checks], [])
+      |> GateEngine.build_review!()
+    end
+
+    assert_raise ArgumentError,
+                 "reviewer profile/session must be distinct from implementer",
+                 fn ->
+                   base_review_attrs()
+                   |> Map.put(:reviewer_session_id, "implementer-session-001")
+                   |> GateEngine.build_review!()
+                 end
+  end
+
+  test "review stage fails closed when dossier digest does not match" do
+    review = GateEngine.build_review!(base_review_attrs())
+
+    composition =
+      base_attrs()
+      |> Map.put(:review_id, review["review_id"])
+      |> Map.put(:stages, [
+        %{
+          stage_key: "review",
+          status: "pass",
+          required: true,
+          details: %{
+            expected_dossier_digest: "sha256:" <> String.duplicate("f", 64),
+            review: review
+          }
+        }
+      ])
+      |> GateEngine.compose!()
+
+    assert composition.decision == "fail"
+
+    assert [
+             %{
+               "stage_key" => "review",
+               "failure_categories" => ["review_dossier_digest_mismatch"],
+               "next_action" => "resolve_review_evidence_before_gate"
+             }
+           ] = composition.failure_findings
+  end
+
   test "test execution stage passes with baseline, calibrated acceptance, retries, and AC evidence" do
     composition =
       base_attrs()
@@ -271,6 +370,38 @@ defmodule Conveyor.GateEngineTest do
       canary_suite_version: "canary-suite@1",
       evidence_refs: ["sha256:" <> String.duplicate("d", 64)],
       evaluated_at: "2026-06-17T01:00:00Z"
+    }
+  end
+
+  defp base_review_attrs do
+    %{
+      review_id: "review-001",
+      run_attempt_id: "run-attempt-001",
+      station_run_id: "station-run-001",
+      reviewer_profile_id: "reviewer-profile-001",
+      reviewer_session_id: "reviewer-session-001",
+      implementer_profile_id: "implementer-profile-001",
+      implementer_session_id: "implementer-session-001",
+      dossier_digest: "sha256:" <> String.duplicate("e", 64),
+      rubric_version: "review-rubric@1",
+      output: %{
+        decision: "approve",
+        recommendation: "gate",
+        summary: "Recorded dossier evidence supports the requested change.",
+        findings: [
+          %{
+            finding_id: "RVW-001",
+            severity: "info",
+            message: "Dossier contains mapped acceptance and verification evidence."
+          }
+        ],
+        checks: [
+          %{
+            check_id: "CHK-001",
+            status: "pass"
+          }
+        ]
+      }
     }
   end
 

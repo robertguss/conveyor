@@ -5,6 +5,7 @@ defmodule Conveyor.Jobs.RunSliceTest do
   alias Conveyor.Ledger
   alias Conveyor.Repo
   alias Conveyor.Stations.Phase1
+  alias Conveyor.Domain.RunAttempt
 
   setup_all do
     {:ok, _started} = Application.ensure_all_started(:conveyor)
@@ -89,7 +90,13 @@ defmodule Conveyor.Jobs.RunSliceTest do
               failure: %{
                 station_key: "reviewer",
                 station_status: "failed",
-                failure_category: "station_worker_failed"
+                failure_category: "station_worker_failed",
+                findings: [
+                  %{
+                    finding_code: "station_worker_failed",
+                    details: %{"station_key" => "reviewer"}
+                  }
+                ]
               }
             }} = RunSlice.run(args, fail_station: "reviewer")
 
@@ -115,6 +122,47 @@ defmodule Conveyor.Jobs.RunSliceTest do
     assert reviewer_log
     assert reviewer_log["metadata"]["result"] == "failure"
     assert reviewer_log["effect_status"] == "declared"
+  end
+
+  test "preflight enforces one active RunAttempt per Slice before station execution" do
+    existing_attempt =
+      RunAttempt.create_attrs!(%{
+        run_attempt_id: "run-slice-active-owner",
+        slice_id: "slice-active-conflict",
+        run_spec_sha256: "sha256:run-spec-active-owner",
+        attempt_number: 1
+      })
+
+    assert {:ok, _record} = Ash.create(RunAttempt, existing_attempt, action: :create)
+
+    args = %{
+      run_attempt_id: "run-slice-active-conflict",
+      slice_id: "slice-active-conflict",
+      run_spec_sha256: "sha256:run-spec-active-conflict"
+    }
+
+    assert {:error,
+            %{
+              status: "failed",
+              processed_station_count: 0,
+              stations: [],
+              failure: %{
+                failure_category: "one_active_attempt_per_slice",
+                active_run_attempt_id: "run-slice-active-owner",
+                findings: [
+                  %{
+                    finding_code: "one_active_attempt_per_slice",
+                    details: %{
+                      "slice_id" => "slice-active-conflict",
+                      "run_attempt_id" => "run-slice-active-conflict",
+                      "active_run_attempt_id" => "run-slice-active-owner"
+                    }
+                  }
+                ]
+              }
+            }} = RunSlice.run(args)
+
+    assert [] = station_payloads(args.run_attempt_id)
   end
 
   test "Oban perform runs the complete station plan" do

@@ -9,10 +9,12 @@ defmodule Conveyor.GateEngine do
 
   alias Conveyor.Domain.GateResult
   alias Conveyor.Domain.PayloadHelpers
+  alias Conveyor.Domain.Review
   alias Conveyor.Domain.RunAttempt
   alias Conveyor.Domain.Slice
 
   @schema_version "conveyor.gate_engine@1"
+  @review_schema_version "conveyor.reviewer_on_dossier@1"
   @stage_log_schema_version "conveyor.gate_stage_log@1"
   @finding_schema_version "conveyor.gate_failure_finding@1"
   @summary_schema_version "conveyor.gate_result_summary@1"
@@ -27,6 +29,9 @@ defmodule Conveyor.GateEngine do
                                "test_execution",
                                "tests"
                              ])
+  @review_stage_keys MapSet.new(["review", "reviewer", "reviewer_verdict"])
+  @approved_review_decisions MapSet.new(["approve", "approved", "pass", "passed"])
+  @passing_check_statuses MapSet.new(["pass", "passed", "ok", "success"])
 
   def compose!(attrs) when is_map(attrs) do
     evaluated_at =
@@ -63,6 +68,60 @@ defmodule Conveyor.GateEngine do
       transition_plan: transition_plan,
       summary: summary(gate_result)
     }
+  end
+
+  def build_review!(attrs) when is_map(attrs) do
+    output =
+      attrs
+      |> PayloadHelpers.fetch_required!(:output)
+      |> normalize_review_output!()
+
+    reviewer_profile_id =
+      attrs |> PayloadHelpers.fetch_required!(:reviewer_profile_id) |> to_string()
+
+    reviewer_session_id =
+      attrs |> PayloadHelpers.fetch_required!(:reviewer_session_id) |> to_string()
+
+    implementer_profile_id =
+      attrs |> PayloadHelpers.fetch_required!(:implementer_profile_id) |> to_string()
+
+    implementer_session_id =
+      attrs |> PayloadHelpers.fetch_required!(:implementer_session_id) |> to_string()
+
+    if reviewer_profile_id == implementer_profile_id or
+         reviewer_session_id == implementer_session_id do
+      raise ArgumentError, "reviewer profile/session must be distinct from implementer"
+    end
+
+    dossier_digest = attrs |> PayloadHelpers.fetch_required!(:dossier_digest) |> to_string()
+    rubric_version = attrs |> PayloadHelpers.fetch_required!(:rubric_version) |> to_string()
+
+    Review.build!(%{
+      review_id: PayloadHelpers.fetch_required!(attrs, :review_id),
+      run_attempt_id: PayloadHelpers.fetch_required!(attrs, :run_attempt_id),
+      station_run_id: PayloadHelpers.fetch_required!(attrs, :station_run_id),
+      reviewer_profile_id: reviewer_profile_id,
+      decision: output["decision"],
+      findings: output["findings"],
+      evidence_refs: [dossier_digest],
+      metadata: %{
+        schema_version: @review_schema_version,
+        category: "reviewer_on_dossier",
+        matrix_ref: @matrix_ref,
+        dossier_digest: dossier_digest,
+        rubric_version: rubric_version,
+        reviewer_session_id: reviewer_session_id,
+        implementer_profile_id: implementer_profile_id,
+        implementer_session_id: implementer_session_id,
+        actor_separation: %{
+          reviewer_profile_distinct: true,
+          reviewer_session_distinct: true
+        },
+        recommendation: output["recommendation"],
+        summary: output["summary"],
+        checks: output["checks"]
+      }
+    })
   end
 
   def summary(gate_result) when is_map(gate_result) do
@@ -258,17 +317,22 @@ defmodule Conveyor.GateEngine do
   end
 
   defp stage_findings(stage_key, details) do
-    if test_execution_stage?(stage_key, details) do
-      findings =
-        baseline_findings(details) ++
-          locked_acceptance_findings(details) ++
-          retry_findings(details) ++
-          acceptance_mapping_findings(details)
+    findings =
+      cond do
+        review_stage?(stage_key, details) ->
+          review_findings(details)
 
-      Enum.reject(findings, &is_nil/1)
-    else
-      []
-    end
+        test_execution_stage?(stage_key, details) ->
+          baseline_findings(details) ++
+            locked_acceptance_findings(details) ++
+            retry_findings(details) ++
+            acceptance_mapping_findings(details)
+
+        true ->
+          []
+      end
+
+    Enum.reject(findings, &is_nil/1)
   end
 
   defp test_execution_stage?(stage_key, details) do
@@ -276,6 +340,150 @@ defmodule Conveyor.GateEngine do
       Map.has_key?(details, "baseline") or
       Map.has_key?(details, "locked_acceptance") or
       Map.has_key?(details, "acceptance_results")
+  end
+
+  defp review_stage?(stage_key, details) do
+    MapSet.member?(@review_stage_keys, stage_key) or Map.has_key?(details, "review")
+  end
+
+  defp review_findings(details) do
+    case Map.get(details, "review") do
+      nil ->
+        [stage_finding("missing_review", "Reviewer-on-dossier output is required.")]
+
+      review when is_map(review) ->
+        metadata = review_metadata(review)
+
+        [
+          review_required_field_finding(review, "review_id"),
+          review_required_field_finding(review, "decision"),
+          review_required_metadata_finding(metadata, "dossier_digest"),
+          review_required_metadata_finding(metadata, "rubric_version"),
+          review_required_metadata_finding(metadata, "recommendation"),
+          review_required_metadata_finding(metadata, "summary"),
+          review_list_metadata_finding(metadata, "checks"),
+          review_dossier_digest_finding(details, metadata),
+          review_decision_finding(review),
+          review_actor_separation_finding(metadata),
+          review_check_finding(metadata)
+        ]
+
+      _review ->
+        [stage_finding("invalid_review", "Reviewer-on-dossier output must be a map.")]
+    end
+  end
+
+  defp review_metadata(review) do
+    case Map.get(review, "metadata") do
+      metadata when is_map(metadata) -> metadata
+      _metadata -> %{}
+    end
+  end
+
+  defp review_required_field_finding(review, field) do
+    if present?(Map.get(review, field)) do
+      nil
+    else
+      stage_finding(
+        "malformed_review_output",
+        "Reviewer-on-dossier output is missing #{field}.",
+        %{"field" => field}
+      )
+    end
+  end
+
+  defp review_required_metadata_finding(metadata, field) do
+    if present?(Map.get(metadata, field)) do
+      nil
+    else
+      stage_finding(
+        "malformed_review_output",
+        "Reviewer-on-dossier metadata is missing #{field}.",
+        %{"field" => field}
+      )
+    end
+  end
+
+  defp review_list_metadata_finding(metadata, field) do
+    case Map.get(metadata, field) do
+      values when is_list(values) and values != [] ->
+        nil
+
+      _values ->
+        stage_finding(
+          "malformed_review_output",
+          "Reviewer-on-dossier metadata must include non-empty #{field}.",
+          %{"field" => field}
+        )
+    end
+  end
+
+  defp review_dossier_digest_finding(details, metadata) do
+    expected_digest = Map.get(details, "expected_dossier_digest")
+    review_digest = Map.get(metadata, "dossier_digest")
+
+    if expected_digest in [nil, review_digest] do
+      nil
+    else
+      stage_finding(
+        "review_dossier_digest_mismatch",
+        "Gate can only use reviews for the same dossier digest.",
+        %{"expected_dossier_digest" => expected_digest, "review_dossier_digest" => review_digest}
+      )
+    end
+  end
+
+  defp review_decision_finding(review) do
+    decision = review |> Map.get("decision") |> detail_status()
+
+    if MapSet.member?(@approved_review_decisions, decision) do
+      nil
+    else
+      stage_finding(
+        "review_not_approved",
+        "Gate requires an approved reviewer-on-dossier decision.",
+        %{"decision" => decision}
+      )
+    end
+  end
+
+  defp review_actor_separation_finding(metadata) do
+    separation = Map.get(metadata, "actor_separation", %{})
+
+    if Map.get(separation, "reviewer_profile_distinct") == true and
+         Map.get(separation, "reviewer_session_distinct") == true do
+      nil
+    else
+      stage_finding(
+        "review_actor_not_separated",
+        "Reviewer profile/session must be distinct from implementer.",
+        %{"actor_separation" => separation}
+      )
+    end
+  end
+
+  defp review_check_finding(metadata) do
+    checks = Map.get(metadata, "checks", [])
+
+    failed_checks =
+      Enum.reject(checks, fn check ->
+        check_status =
+          if is_map(check) do
+            check |> Map.get("status") |> detail_status()
+          end
+
+        MapSet.member?(@passing_check_statuses, check_status)
+      end)
+
+    if failed_checks == [] do
+      nil
+    else
+      stage_finding(
+        "review_checks_failed",
+        "Reviewer checks must all pass before gate use.",
+        %{"failed_checks" => failed_checks}
+      )
+    end
   end
 
   defp baseline_findings(details) do
@@ -607,6 +815,51 @@ defmodule Conveyor.GateEngine do
   defp allowance_reason(result, "missing_evidence_allowed") do
     Map.get(result, "missing_evidence_reason") || Map.get(result, "allowance_reason")
   end
+
+  defp normalize_review_output!(output) when is_map(output) do
+    output = PayloadHelpers.normalize_map(output)
+
+    %{
+      "decision" => output |> required_review_string!("decision") |> normalize_status(),
+      "recommendation" => required_review_string!(output, "recommendation"),
+      "summary" => required_review_string!(output, "summary"),
+      "findings" => required_review_list!(output, "findings"),
+      "checks" => required_review_list!(output, "checks")
+    }
+  end
+
+  defp normalize_review_output!(_output) do
+    raise ArgumentError, "reviewer output must be a map"
+  end
+
+  defp required_review_string!(output, field) do
+    case Map.get(output, field) do
+      value when is_binary(value) and value != "" ->
+        value
+
+      _value ->
+        raise ArgumentError, "reviewer output is missing #{field}"
+    end
+  end
+
+  defp required_review_list!(output, field) do
+    case Map.get(output, field) do
+      values when is_list(values) and values != [] ->
+        Enum.map(values, &review_output_map!(&1, field))
+
+      _values ->
+        raise ArgumentError, "reviewer output #{field} must be a non-empty list"
+    end
+  end
+
+  defp review_output_map!(value, _field) when is_map(value),
+    do: PayloadHelpers.normalize_map(value)
+
+  defp review_output_map!(_value, field) do
+    raise ArgumentError, "reviewer output #{field} entries must be maps"
+  end
+
+  defp present?(value), do: value not in [nil, "", []]
 
   defp transition_plan("pass", attrs, _failure_findings) do
     context = transition_context(attrs, true, "pass", nil)

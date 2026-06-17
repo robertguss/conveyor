@@ -14,6 +14,7 @@ defmodule Conveyor.Jobs.RunSlice do
   alias Conveyor.Stations.Phase1
 
   @schema_version "conveyor.run_slice@1"
+  @finding_schema_version "conveyor.run_slice_finding@1"
   @timeline_schema_version "conveyor.station_timeline@1"
   @timeline_channels ["timeline", "stations"]
 
@@ -37,17 +38,20 @@ defmodule Conveyor.Jobs.RunSlice do
 
   def run(args, opts \\ []) when is_map(args) and is_list(opts) do
     args = normalize_args(args)
+
+    case ensure_one_active_attempt_per_slice(args) do
+      :ok ->
+        run_station_plan(args, opts)
+
+      {:error, failure} ->
+        {:error, preflight_failure_summary(args, failure)}
+    end
+  end
+
+  defp run_station_plan(args, opts) do
     plan = Phase1.station_plan(args)
 
-    initial_summary = %{
-      schema_version: @schema_version,
-      run_attempt_id: PayloadHelpers.fetch_required!(args, :run_attempt_id),
-      status: "completed",
-      station_count: length(plan),
-      processed_station_count: 0,
-      resumed_station_count: 0,
-      stations: []
-    }
+    initial_summary = initial_summary(args, plan)
 
     plan
     |> Enum.reduce_while(initial_summary, fn station, summary ->
@@ -77,6 +81,19 @@ defmodule Conveyor.Jobs.RunSlice do
       {:error, _reason} = error -> error
       summary -> {:ok, summary}
     end
+  end
+
+  defp initial_summary(args, plan) do
+    %{
+      schema_version: @schema_version,
+      run_attempt_id: PayloadHelpers.fetch_required!(args, :run_attempt_id),
+      slice_id: PayloadHelpers.fetch_required!(args, :slice_id),
+      status: "completed",
+      station_count: length(plan),
+      processed_station_count: 0,
+      resumed_station_count: 0,
+      stations: []
+    }
   end
 
   def station_runs_for(run_attempt_id) when is_binary(run_attempt_id) do
@@ -303,6 +320,20 @@ defmodule Conveyor.Jobs.RunSlice do
     })
   end
 
+  defp preflight_failure_summary(args, failure) do
+    %{
+      schema_version: @schema_version,
+      run_attempt_id: PayloadHelpers.fetch_required!(args, :run_attempt_id),
+      slice_id: PayloadHelpers.fetch_required!(args, :slice_id),
+      status: "failed",
+      station_count: Phase1.station_count(),
+      processed_station_count: 0,
+      resumed_station_count: 0,
+      stations: [],
+      failure: failure
+    }
+  end
+
   defp station_summary(station, record, source) do
     %{
       station_key: station.station_key,
@@ -315,13 +346,62 @@ defmodule Conveyor.Jobs.RunSlice do
   end
 
   defp station_failure(station, record, reason) do
+    failure_category = to_string(reason)
+
     %{
       schema_version: @schema_version,
       category: "station_worker_failure",
       station_key: station.station_key,
       station_run_id: record.external_id,
       station_status: record.payload["station_status"],
-      failure_category: to_string(reason)
+      failure_category: failure_category,
+      findings: [
+        run_slice_finding(
+          failure_category,
+          "Phase 1 station #{station.station_key} stopped before completing the station plan.",
+          %{
+            "station_key" => station.station_key,
+            "station_run_id" => record.external_id,
+            "station_status" => record.payload["station_status"]
+          }
+        )
+      ]
+    }
+  end
+
+  defp active_attempt_failure(args, active_attempt) do
+    slice_id = PayloadHelpers.fetch_required!(args, :slice_id)
+    run_attempt_id = PayloadHelpers.fetch_required!(args, :run_attempt_id)
+    active_run_attempt_id = active_attempt.payload["run_attempt_id"] || active_attempt.external_id
+
+    %{
+      schema_version: @schema_version,
+      category: "run_slice_preflight_failure",
+      failure_category: "one_active_attempt_per_slice",
+      slice_id: slice_id,
+      run_attempt_id: run_attempt_id,
+      active_run_attempt_id: active_run_attempt_id,
+      findings: [
+        run_slice_finding(
+          "one_active_attempt_per_slice",
+          "RunSlice requires exactly one active RunAttempt per Slice before station execution.",
+          %{
+            "slice_id" => slice_id,
+            "run_attempt_id" => run_attempt_id,
+            "active_run_attempt_id" => active_run_attempt_id
+          }
+        )
+      ]
+    }
+  end
+
+  defp run_slice_finding(finding_code, message, details) do
+    %{
+      schema_version: @finding_schema_version,
+      category: "run_slice_failure_finding",
+      finding_code: finding_code,
+      message: message,
+      details: details
     }
   end
 
@@ -351,6 +431,38 @@ defmodule Conveyor.Jobs.RunSlice do
 
   defp resumed_count(%{source: "resumed"}), do: 1
   defp resumed_count(_station_summary), do: 0
+
+  defp ensure_one_active_attempt_per_slice(args) do
+    slice_id = PayloadHelpers.fetch_required!(args, :slice_id)
+    run_attempt_id = PayloadHelpers.fetch_required!(args, :run_attempt_id)
+
+    case fetch_active_attempt_for_other_run(slice_id, run_attempt_id) do
+      nil -> :ok
+      active_attempt -> {:error, active_attempt_failure(args, active_attempt)}
+    end
+  end
+
+  defp fetch_active_attempt_for_other_run(slice_id, run_attempt_id) do
+    result =
+      Repo.query!(
+        """
+        SELECT id::text, external_id, name, status, payload, inserted_at, updated_at
+        FROM run_attempts
+        WHERE status = 'active'
+          AND payload->>'slice_id' = $1
+          AND external_id <> $2
+        ORDER BY inserted_at
+        LIMIT 1
+        """,
+        [slice_id, run_attempt_id],
+        log: false
+      )
+
+    case result.rows do
+      [] -> nil
+      [row] -> row_to_record(row)
+    end
+  end
 
   defp station_sort_key(payload) do
     {
