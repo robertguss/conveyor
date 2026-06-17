@@ -7,6 +7,11 @@ defmodule Conveyor.Observability.SpanHierarchyTest do
   @trace_id "4bf92f3577b34da6a3ce929d0e0e4736"
   @run_span_id "00f067aa0ba902b7"
 
+  setup_all do
+    {:ok, _started} = Application.ensure_all_started(:telemetry)
+    :ok
+  end
+
   test "emits run_slice and station spans with OpenTelemetry trace context" do
     handler_id = "span-hierarchy-test-#{System.unique_integer([:positive])}"
     test_pid = self()

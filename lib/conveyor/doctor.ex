@@ -199,26 +199,16 @@ defmodule Conveyor.Doctor do
   defp docker_check(probe) do
     case probe_result(probe, :docker) do
       :auto ->
-        with docker when is_binary(docker) <- System.find_executable("docker"),
-             {output, 0} <-
-               System.cmd(docker, ["info", "--format", "{{json .SecurityOptions}}"],
-                 stderr_to_stdout: true
-               ),
-             true <- String.contains?(String.downcase(output), "rootless") do
-          pass(
-            "docker_rootless",
-            "docker_rootless_available",
-            "Docker is available with rootless security options"
-          )
-        else
-          _missing_or_not_rootless ->
-            fail(
-              "docker_rootless",
-              "no_docker_rootless",
-              "Docker is missing or not reporting rootless mode",
-              "Install rootless Docker or configure the sandbox runtime expected by Conveyor."
-            )
-        end
+        Conveyor.Policy.DockerSandbox.evaluate()
+        |> docker_sandbox_check()
+
+      {:capabilities, capabilities} ->
+        [host_capabilities: capabilities]
+        |> Conveyor.Policy.DockerSandbox.evaluate()
+        |> docker_sandbox_check()
+
+      {:sandbox_report, report} when is_map(report) ->
+        docker_sandbox_check(report)
 
       result ->
         check_from_probe(
@@ -228,6 +218,35 @@ defmodule Conveyor.Doctor do
           "Docker rootless mode is available"
         )
     end
+  end
+
+  defp docker_sandbox_check(%{"status" => "pass"} = report) do
+    pass(
+      "docker_sandbox",
+      "docker_sandbox_constraints_available",
+      "Docker sandbox host capabilities satisfy required constraints",
+      %{sandbox_report: report}
+    )
+  end
+
+  defp docker_sandbox_check(%{"status" => "warn"} = report) do
+    warn(
+      "docker_sandbox",
+      "docker_sandbox_constraints_degraded",
+      "Docker sandbox host capabilities are available with degraded optional constraints",
+      "Review optional Docker security options before running higher-risk stations.",
+      %{sandbox_report: report}
+    )
+  end
+
+  defp docker_sandbox_check(%{"status" => "fail"} = report) do
+    fail(
+      "docker_sandbox",
+      "docker_sandbox_constraints_unavailable",
+      "Required Docker sandbox constraints are unavailable",
+      "Install or configure Docker sandbox capabilities required by the active policy profile.",
+      %{sandbox_report: report}
+    )
   end
 
   defp git_check(project_root, probe) do
