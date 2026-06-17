@@ -10,8 +10,10 @@
     "bundle_id",
     "run_id",
     "created_at",
-    "root_digest",
+    "bundle_root_sha256",
     "artifact_schema_versions",
+    "excluded_fields",
+    "canonical_manifest",
     "artifacts"
   ],
   "properties": {
@@ -30,7 +32,7 @@
       "type": "string",
       "format": "date-time"
     },
-    "root_digest": {
+    "bundle_root_sha256": {
       "type": "string",
       "pattern": "^sha256:[a-f0-9]{64}$"
     },
@@ -46,48 +48,241 @@
         "pattern": "^[a-z][a-z0-9_.]*@[0-9]+$"
       }
     },
+    "excluded_fields": {
+      "$ref": "#/$defs/excluded_fields"
+    },
+    "canonical_manifest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "matrix_ref",
+        "identity",
+        "artifact_count",
+        "excluded_fields",
+        "artifacts"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": "conveyor.run_bundle_manifest@1"
+        },
+        "matrix_ref": {
+          "const": "conveyor-quality-ci-evals-vmr.13"
+        },
+        "identity": {
+          "type": "object",
+          "minProperties": 1,
+          "additionalProperties": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "artifact_count": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "excluded_fields": {
+          "$ref": "#/$defs/excluded_fields"
+        },
+        "artifacts": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/canonical_artifact"
+          }
+        }
+      }
+    },
     "artifacts": {
       "type": "array",
       "minItems": 1,
       "items": {
-        "type": "object",
-        "additionalProperties": false,
-        "required": [
-          "schema_version",
-          "artifact_role",
-          "path",
-          "sha256"
-        ],
-        "properties": {
-          "schema_version": {
-            "type": "string",
-            "minLength": 1
-          },
-          "artifact_role": {
-            "enum": [
-              "manifest",
-              "evidence",
-              "review",
-              "gate",
-              "run_bundle",
-              "provenance",
-              "key_result",
-              "dossier",
-              "pr_body",
-              "command_log",
-              "diff"
-            ]
-          },
-          "path": {
-            "type": "string",
-            "minLength": 1
-          },
-          "sha256": {
-            "type": "string",
-            "pattern": "^[a-f0-9]{64}$"
+        "$ref": "#/$defs/projected_artifact"
+      }
+    }
+  },
+  "$defs": {
+    "excluded_fields": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "timestamp_fields",
+        "host_path_fields",
+        "ordering_fields",
+        "generated_artifact_roles"
+      ],
+      "properties": {
+        "timestamp_fields": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string"
+          }
+        },
+        "host_path_fields": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string"
+          }
+        },
+        "ordering_fields": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string"
+          }
+        },
+        "generated_artifact_roles": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/artifact_role"
           }
         }
       }
+    },
+    "artifact_role": {
+      "enum": [
+        "manifest",
+        "evidence",
+        "review",
+        "gate",
+        "run_bundle",
+        "provenance",
+        "key_result",
+        "quality_output",
+        "quality_outputs",
+        "canary_result",
+        "canary_results",
+        "dossier",
+        "pr_body",
+        "command_log",
+        "log",
+        "logs",
+        "tool_output",
+        "prompt",
+        "diff"
+      ]
+    },
+    "projected_artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "artifact_role",
+        "path",
+        "sha256"
+      ],
+      "properties": {
+        "schema_version": {
+          "type": "string",
+          "minLength": 1
+        },
+        "artifact_role": {
+          "$ref": "#/$defs/artifact_role"
+        },
+        "path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "sha256": {
+          "$ref": "#/$defs/hex_digest"
+        },
+        "raw_sha256": {
+          "$ref": "#/$defs/hex_digest"
+        },
+        "redacted_sha256": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/hex_digest"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "sensitivity": {
+          "type": "string"
+        },
+        "quarantined": {
+          "type": "boolean"
+        },
+        "projection_mode": {
+          "enum": [
+            "raw",
+            "redacted"
+          ]
+        },
+        "export_policy": {
+          "type": "object"
+        }
+      }
+    },
+    "canonical_artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "artifact_role",
+        "sha256"
+      ],
+      "properties": {
+        "schema_version": {
+          "type": "string",
+          "minLength": 1
+        },
+        "artifact_role": {
+          "$ref": "#/$defs/artifact_role"
+        },
+        "artifact_key": {
+          "type": "string",
+          "minLength": 1
+        },
+        "path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "sha256": {
+          "$ref": "#/$defs/qualified_digest"
+        },
+        "raw_sha256": {
+          "$ref": "#/$defs/qualified_digest"
+        },
+        "redacted_sha256": {
+          "$ref": "#/$defs/qualified_digest"
+        },
+        "content_type": {
+          "type": "string"
+        },
+        "sensitivity": {
+          "type": "string"
+        },
+        "quarantined": {
+          "type": "boolean"
+        },
+        "projection_mode": {
+          "enum": [
+            "raw",
+            "redacted"
+          ]
+        },
+        "export_policy": {
+          "type": "object"
+        },
+        "size_bytes": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "hex_digest": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "qualified_digest": {
+      "type": "string",
+      "pattern": "^(sha256:)?[a-f0-9]{64}$"
     }
   }
 }

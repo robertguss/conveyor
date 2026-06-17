@@ -9,7 +9,27 @@ defmodule Conveyor.AgentRunner do
 
   @snapshot_schema_version "conveyor.agent_profile_capability_snapshot@1"
   @snapshot_category "agent_profile_capability_snapshot"
+  @event_envelope_version "conveyor.agent_event@1"
+  @event_log_schema_version "conveyor.normalized_agent_event_log@1"
+  @event_matrix_ref "conveyor-quality-ci-evals-vmr.13"
   @autonomy_levels ["L0", "L1", "L2", "L3", "L4"]
+
+  @adapter_event_types [
+    "session_started",
+    "message_delta",
+    "message_completed",
+    "command_requested",
+    "command_policy_decision",
+    "command_started",
+    "command_completed",
+    "file_change_observed",
+    "heartbeat",
+    "final_response",
+    "cancel_requested",
+    "cancel_acknowledged",
+    "adapter_error",
+    "session_completed"
+  ]
 
   @capability_keys [
     "streaming_events",
@@ -84,6 +104,8 @@ defmodule Conveyor.AgentRunner do
               {:ok, adapter_session()} | {:error, term()}
 
   def snapshot_schema_version, do: @snapshot_schema_version
+  def event_envelope_version, do: @event_envelope_version
+  def adapter_event_types, do: @adapter_event_types
   def capability_keys, do: @capability_keys
   def autonomy_levels, do: @autonomy_levels
 
@@ -205,6 +227,60 @@ defmodule Conveyor.AgentRunner do
     raise ArgumentError, "agent capability snapshot must be a map"
   end
 
+  def normalize_adapter_events!(raw_events, context, opts \\ []) when is_list(opts) do
+    start_sequence = Keyword.get(opts, :start_sequence, 1)
+
+    raw_events
+    |> Enum.to_list()
+    |> Enum.with_index(start_sequence)
+    |> Enum.map(fn {raw_event, sequence} ->
+      normalize_adapter_event!(raw_event, context, sequence: sequence)
+    end)
+  end
+
+  def normalize_adapter_event!(raw_event, context, opts \\ [])
+
+  def normalize_adapter_event!(raw_event, context, opts)
+      when is_map(raw_event) and is_map(context) and is_list(opts) do
+    sequence = Keyword.fetch!(opts, :sequence)
+    event_type = raw_event |> raw_event_type!() |> normalize_event_type!()
+    trace_context = trace_context!(raw_event, context)
+    adapter = required_context!(context, :adapter)
+    adapter_session_id = required_context!(context, :adapter_session_id)
+
+    %{
+      "event_version" => @event_envelope_version,
+      "event_type" => event_type,
+      "run_spec_sha256" => required_context!(context, :run_spec_sha256),
+      "run_attempt_id" => required_context!(context, :run_attempt_id),
+      "agent_session_id" => required_context!(context, :agent_session_id),
+      "adapter" => adapter,
+      "adapter_session_id" => adapter_session_id,
+      "seq" => sequence,
+      "raw_ref" => raw_ref(raw_event, adapter, adapter_session_id, event_type, sequence),
+      "trace_context" => trace_context,
+      "payload" => normalized_event_payload(raw_event)
+    }
+  end
+
+  def normalize_adapter_event!(_raw_event, _context, _opts) do
+    raise ArgumentError, "adapter event and normalization context must be maps"
+  end
+
+  def normalized_event_log(events) when is_list(events) do
+    sequences = Enum.map(events, &Map.fetch!(&1, "seq"))
+
+    %{
+      "schema_version" => @event_log_schema_version,
+      "matrix_ref" => @event_matrix_ref,
+      "event_count" => length(events),
+      "event_types" => Enum.map(events, &Map.fetch!(&1, "event_type")),
+      "first_seq" => List.first(sequences),
+      "last_seq" => List.last(sequences),
+      "events" => events
+    }
+  end
+
   def theoretical_autonomy_ceiling(capabilities) when is_map(capabilities) do
     normalized = normalize_capabilities!(capabilities)
 
@@ -242,6 +318,118 @@ defmodule Conveyor.AgentRunner do
 
   defp normalize_capabilities!(_capabilities) do
     raise ArgumentError, "agent capabilities must be a map"
+  end
+
+  defp raw_event_type!(raw_event) do
+    get(raw_event, :event_type) || get(raw_event, :type) || get(raw_event, :kind) ||
+      get(raw_event, :event) || raise ArgumentError, "adapter event is missing event_type"
+  end
+
+  defp normalize_event_type!(event_type) when is_atom(event_type) do
+    event_type |> Atom.to_string() |> normalize_event_type!()
+  end
+
+  defp normalize_event_type!(event_type) when is_binary(event_type) do
+    normalized =
+      event_type
+      |> String.trim()
+      |> String.downcase()
+      |> String.replace(~r/[^a-z0-9]+/, "_")
+      |> String.trim("_")
+
+    if normalized in @adapter_event_types do
+      normalized
+    else
+      raise ArgumentError, "unknown adapter event type: #{inspect(event_type)}"
+    end
+  end
+
+  defp normalize_event_type!(event_type) do
+    raise ArgumentError,
+          "adapter event type must be a string or atom, got: #{inspect(event_type)}"
+  end
+
+  defp trace_context!(raw_event, context) do
+    raw_trace_context = get(raw_event, :trace_context, %{})
+    context_trace_context = get(context, :trace_context, %{})
+
+    merged_trace_context =
+      context_trace_context
+      |> normalize_string_key_map!("trace_context")
+      |> Map.merge(normalize_string_key_map!(raw_trace_context, "trace_context"))
+
+    trace_id =
+      get(raw_event, :trace_id) || Map.get(merged_trace_context, "trace_id") ||
+        get(context, :trace_id) || raise ArgumentError, "trace context is missing trace_id"
+
+    span_id =
+      get(raw_event, :span_id) || Map.get(merged_trace_context, "span_id") ||
+        get(context, :span_id) || raise ArgumentError, "trace context is missing span_id"
+
+    parent_span_id =
+      get(raw_event, :parent_span_id) || Map.get(merged_trace_context, "parent_span_id") ||
+        get(context, :parent_span_id)
+
+    traceparent =
+      get(raw_event, :traceparent) || Map.get(merged_trace_context, "traceparent") ||
+        get(context, :traceparent) || generated_traceparent(trace_id, span_id)
+
+    merged_trace_context
+    |> Map.put("trace_id", trace_id)
+    |> Map.put("span_id", span_id)
+    |> maybe_put("parent_span_id", parent_span_id)
+    |> maybe_put("traceparent", traceparent)
+  end
+
+  defp generated_traceparent(trace_id, span_id) do
+    with true <- lowercase_hex?(trace_id, 32),
+         true <- lowercase_hex?(span_id, 16) do
+      "00-#{trace_id}-#{span_id}-01"
+    else
+      _ -> nil
+    end
+  end
+
+  defp lowercase_hex?(value, length) when is_binary(value) and byte_size(value) == length do
+    String.match?(value, ~r/^[0-9a-f]+$/)
+  end
+
+  defp lowercase_hex?(_value, _length), do: false
+
+  defp raw_ref(raw_event, adapter, adapter_session_id, event_type, sequence) do
+    get(raw_event, :raw_ref) || get(raw_event, :id) ||
+      "#{adapter}:#{adapter_session_id}:#{String.pad_leading(to_string(sequence), 10, "0")}:#{event_type}"
+  end
+
+  defp normalized_event_payload(raw_event) do
+    raw_event
+    |> get(:payload, %{})
+    |> normalize_payload_value()
+  end
+
+  defp normalize_payload_value(value) when is_map(value) do
+    normalize_string_key_map!(value, "payload")
+  end
+
+  defp normalize_payload_value(nil), do: %{}
+  defp normalize_payload_value(value), do: %{"value" => value}
+
+  defp normalize_string_key_map!(nil, _field), do: %{}
+
+  defp normalize_string_key_map!(map, field) when is_map(map) do
+    Map.new(map, fn
+      {key, value} when is_atom(key) or is_binary(key) ->
+        {to_string(key), value}
+
+      {key, _value} ->
+        raise ArgumentError, "#{field} keys must be atoms or strings, got: #{inspect(key)}"
+    end)
+  end
+
+  defp normalize_string_key_map!(_map, field), do: raise(ArgumentError, "#{field} must be a map")
+
+  defp required_context!(context, key) do
+    get(context, key) || raise ArgumentError, "event normalization context is missing #{key}"
   end
 
   defp normalize_boolean!(_capability, value) when is_boolean(value), do: value
@@ -324,6 +512,9 @@ defmodule Conveyor.AgentRunner do
 
   defp fallback(nil, fallback), do: fallback
   defp fallback(value, _fallback), do: value
+
+  defp maybe_put(map, _key, nil), do: map
+  defp maybe_put(map, key, value), do: Map.put(map, key, value)
 
   defp get(map, key, default \\ nil) do
     Map.get(map, key, Map.get(map, to_string(key), default))

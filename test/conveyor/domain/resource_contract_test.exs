@@ -285,6 +285,145 @@ defmodule Conveyor.Domain.ResourceContractTest do
     assert length(timeline) == 2
   end
 
+  test "complete AgentBrief emits a digest and can transition an approved Slice to ready" do
+    assert {:ok, slice} =
+             Ash.create(
+               Conveyor.Domain.Slice,
+               Conveyor.Domain.Slice.create_attrs!(%{
+                 slice_id: "agent-brief-slice-001",
+                 plan_id: "agent-brief-plan-001"
+               }),
+               action: :create
+             )
+
+    assert {:ok, approved, _event, [_outbox], _log} =
+             Conveyor.Domain.Slice.transition(
+               slice,
+               :approve,
+               %{actor: "reviewer@example.com", previous_actor: "author@example.com"},
+               trace_id: "trace-agent-brief-slice-001",
+               span_id: "span-agent-brief-approve",
+               stream_id: "agent-brief-slice-001"
+             )
+
+    assert {:ok, brief} =
+             Ash.create(
+               Conveyor.Domain.AgentBrief,
+               Conveyor.Domain.AgentBrief.create_attrs!(agent_brief_attrs()),
+               action: :create
+             )
+
+    assert %{
+             schema_version: "conveyor.agent_brief_readiness@1",
+             category: "agent_brief_readiness",
+             status: "ready",
+             ready: true,
+             brief_key: "brief-complete-task",
+             version: 1,
+             slice_id: "agent-brief-slice-001",
+             findings: [],
+             next_actions: [],
+             contract_digest: contract_digest
+           } = Conveyor.Domain.AgentBrief.readiness_report(brief)
+
+    assert contract_digest =~ ~r/^sha256:[a-f0-9]{64}$/
+    assert brief.external_id == "brief-complete-task@1"
+    assert brief.payload["contract_digest"] == contract_digest
+
+    context = Conveyor.Domain.AgentBrief.readiness_context!(brief)
+
+    assert %{
+             plan_ready: true,
+             readiness: "ready",
+             contract_locked: true,
+             contract_lock_id: "lock-agent-brief-001",
+             artifact_refs: [^contract_digest],
+             agent_brief_digest: ^contract_digest
+           } = context
+
+    assert {:ok, ready, event, [_outbox], log} =
+             Conveyor.Domain.Slice.transition(
+               approved,
+               :ready,
+               context,
+               trace_id: "trace-agent-brief-slice-001",
+               span_id: "span-agent-brief-ready",
+               stream_id: "agent-brief-slice-001"
+             )
+
+    assert ready.payload["slice_state"] == "ready"
+    assert event.event_type == "domain_state_transition.slice.ready"
+
+    assert Enum.map(log.guard_results, & &1.guard) == [
+             "plan_ready",
+             "contract_locked",
+             "artifacts_present"
+           ]
+  end
+
+  test "AgentBrief readiness blocks vague, testless, and too-large contracts with stable findings" do
+    cases = [
+      {
+        "vague",
+        agent_brief_attrs(%{
+          brief_key: "brief-vague",
+          current_behavior: "Does stuff.",
+          desired_behavior: "Make it better."
+        }),
+        "vague_agent_brief",
+        "vague"
+      },
+      {
+        "testless",
+        agent_brief_attrs(%{
+          brief_key: "brief-testless",
+          required_tests: [],
+          verification_commands: []
+        }),
+        "testless_agent_brief",
+        "testless"
+      },
+      {
+        "too-large",
+        agent_brief_attrs(%{
+          brief_key: "brief-too-large",
+          current_behavior:
+            String.duplicate("Existing bounded behavior remains reviewable. ", 400)
+        }),
+        "brief_too_large",
+        "too_large"
+      }
+    ]
+
+    for {_name, attrs, expected_code, expected_category} <- cases do
+      report =
+        attrs
+        |> Conveyor.Domain.AgentBrief.build!()
+        |> Conveyor.Domain.AgentBrief.readiness_report()
+
+      refute report.ready
+      assert report.status == "blocked"
+      assert report.contract_digest =~ ~r/^sha256:[a-f0-9]{64}$/
+
+      assert %{
+               schema_version: "conveyor.agent_brief_readiness_finding@1",
+               category: "agent_brief_readiness",
+               finding_code: ^expected_code,
+               readiness_category: ^expected_category,
+               severity: "blocking",
+               next_actions: [%{schema_version: "conveyor.agent_brief_next_action@1"}]
+             } = Enum.find(report.findings, &(&1.finding_code == expected_code))
+
+      assert Enum.any?(report.next_actions, fn action ->
+               action.command == ["mix", "conveyor.plan_audit", "--agent-brief"]
+             end)
+
+      assert_raise ArgumentError, ~r/AgentBrief is not ready: /, fn ->
+        Conveyor.Domain.AgentBrief.readiness_context!(report)
+      end
+    end
+  end
+
   test "RunAttempt state machine guards autonomy, artifacts, review, gate, and reports" do
     assert {:ok, attempt} =
              Ash.create(
@@ -406,15 +545,83 @@ defmodule Conveyor.Domain.ResourceContractTest do
       })
 
     assert %{external_id: "sha256:" <> _, payload: bundle_payload} = run_bundle_attrs
-    assert run_bundle_attrs.external_id == bundle_payload["run_bundle_sha256"]
+    assert run_bundle_attrs.external_id == bundle_payload["bundle_root_sha256"]
     assert bundle_payload["artifact_sha256s"] == [artifact_sha256]
+    refute Map.has_key?(bundle_payload, "run_bundle_sha256")
+
+    assert %{
+             "schema_version" => "conveyor.run_bundle_manifest@1",
+             "matrix_ref" => "conveyor-quality-ci-evals-vmr.13",
+             "artifact_count" => 1,
+             "excluded_fields" => excluded_fields,
+             "artifacts" => [
+               %{
+                 "artifact_role" => "evidence",
+                 "artifact_key" => "baseline-summary",
+                 "sha256" => ^artifact_sha256
+               }
+             ]
+           } = bundle_payload["canonical_manifest"]
+
+    assert "created_at" in excluded_fields["timestamp_fields"]
+    assert "blob_path" in excluded_fields["host_path_fields"]
+
+    bundle_root_sha256 = run_bundle_attrs.external_id
 
     assert %{
              schema_version: "conveyor.run_bundle_summary@1",
              category: "run_bundle_projection",
              artifact_count: 1,
+             bundle_root_sha256: ^bundle_root_sha256,
              run_spec_sha256: "sha256:run-spec-demo"
            } = Conveyor.Domain.RunBundle.summary(bundle_payload)
+
+    dossier_sha256 = Conveyor.Domain.PayloadHelpers.sha256_binary("human review dossier")
+
+    evidence_artifact =
+      Map.merge(artifact_record.payload, %{
+        "artifact_role" => "evidence",
+        "path" => "evidence/baseline-summary.json",
+        "created_at" => "2026-06-16T21:40:00Z",
+        "blob_path" => "/tmp/first-host/blobs/evidence.json"
+      })
+
+    dossier_artifact = %{
+      "schema_version" => "dossier@1",
+      "artifact_role" => "dossier",
+      "artifact_key" => "human-dossier",
+      "path" => "dossiers/human-dossier.md",
+      "sha256" => dossier_sha256,
+      "generated_at" => "2026-06-16T21:40:00Z",
+      "host_path" => "/tmp/first-host/dossiers/human-dossier.md"
+    }
+
+    first_bundle =
+      Conveyor.Domain.RunBundle.build!(%{
+        bundle_key: "run-phase1-demo-bundle",
+        run_spec_sha256: "sha256:run-spec-demo",
+        artifacts: [dossier_artifact, evidence_artifact],
+        metadata: %{generated_at: "2026-06-16T21:40:00Z", host_path: "/tmp/first-host"}
+      })
+
+    second_bundle =
+      Conveyor.Domain.RunBundle.build!(%{
+        bundle_key: "run-phase1-demo-bundle",
+        run_spec_sha256: "sha256:run-spec-demo",
+        artifacts: [
+          Map.put(evidence_artifact, "blob_path", "/tmp/second-host/blobs/evidence.json"),
+          Map.put(dossier_artifact, "generated_at", "2026-06-17T21:40:00Z")
+        ],
+        metadata: %{generated_at: "2026-06-17T21:40:00Z", host_path: "/tmp/second-host"}
+      })
+
+    assert first_bundle["bundle_root_sha256"] == second_bundle["bundle_root_sha256"]
+    assert first_bundle["canonical_manifest"] == second_bundle["canonical_manifest"]
+
+    canonical_artifacts_json = Jason.encode!(first_bundle["canonical_manifest"]["artifacts"])
+    refute canonical_artifacts_json =~ "/tmp/first-host"
+    refute canonical_artifacts_json =~ "/tmp/second-host"
+    refute canonical_artifacts_json =~ "created_at"
 
     assert {:ok, _bundle_record} =
              Ash.create(Conveyor.Domain.RunBundle, run_bundle_attrs, action: :create)
@@ -1027,5 +1234,40 @@ defmodule Conveyor.Domain.ResourceContractTest do
     digest_set()
     |> Enum.reverse()
     |> Map.new()
+  end
+
+  defp agent_brief_attrs(overrides \\ %{}) do
+    %{
+      brief_key: "brief-complete-task",
+      version: 1,
+      slice_id: "agent-brief-slice-001",
+      title: "Complete task endpoint AgentBrief",
+      current_behavior:
+        "Tasks can already be created and listed through the sample application API.",
+      desired_behavior:
+        "Tasks can be marked complete and list responses show the completed state.",
+      key_interfaces: ["HTTP PATCH /tasks/:id/complete", "GET /tasks response schema"],
+      acceptance_criteria_refs: ["AC-001", "AC-002"],
+      required_tests: ["pytest sample_apps/fastapi_tasks/tests/test_complete_task.py"],
+      verification_commands: [
+        %{
+          command_id: "VERIFY-001",
+          command: ["python3", "-m", "pytest", "sample_apps/fastapi_tasks/tests"]
+        }
+      ],
+      out_of_scope: ["Authentication changes", "Production deployment"],
+      risks: ["Regression risk around existing task listing behavior"],
+      non_goals: ["Do not redesign task persistence"],
+      allowed_write_paths: ["sample_apps/fastapi_tasks/**"],
+      protected_paths: [".conveyor/**", "priv/repo/**"],
+      autonomy_level: "L1",
+      lock_metadata: %{
+        contract_lock_id: "lock-agent-brief-001",
+        locked_by: "owner@example.com",
+        locked_at: "2026-06-17T00:00:00Z",
+        reason: "Ready for bounded tracer execution"
+      }
+    }
+    |> Map.merge(overrides)
   end
 end

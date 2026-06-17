@@ -3,22 +3,183 @@
   "bundle_id": "bundle-001",
   "run_id": "run-20260616-0001",
   "created_at": "2026-06-16T19:34:00Z",
-  "root_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "bundle_root_sha256": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
   "artifact_schema_versions": {
     "manifest": "manifest@1",
     "evidence": "evidence@1",
     "review": "review@1",
     "gate": "gate@1",
-    "run_bundle": "run_bundle@1",
     "provenance": "provenance@1",
-    "key_result": "key_result@1"
+    "dossier": "dossier@1",
+    "pr_body": "pr_body@1",
+    "diff": "diff@1",
+    "logs": "logs@1",
+    "quality_outputs": "quality_outputs@1",
+    "canary_results": "canary_results@1"
+  },
+  "excluded_fields": {
+    "timestamp_fields": [
+      "created_at",
+      "generated_at",
+      "inserted_at",
+      "updated_at"
+    ],
+    "host_path_fields": [
+      "absolute_path",
+      "blob_path",
+      "host_path",
+      "redacted_blob_path",
+      "root_path",
+      "workspace_path"
+    ],
+    "ordering_fields": [
+      "artifacts"
+    ],
+    "generated_artifact_roles": [
+      "manifest",
+      "run_bundle"
+    ]
+  },
+  "canonical_manifest": {
+    "schema_version": "conveyor.run_bundle_manifest@1",
+    "matrix_ref": "conveyor-quality-ci-evals-vmr.13",
+    "identity": {
+      "bundle_id": "bundle-001",
+      "run_id": "run-20260616-0001"
+    },
+    "artifact_count": 10,
+    "excluded_fields": {
+      "timestamp_fields": [
+        "created_at",
+        "generated_at",
+        "inserted_at",
+        "updated_at"
+      ],
+      "host_path_fields": [
+        "absolute_path",
+        "blob_path",
+        "host_path",
+        "redacted_blob_path",
+        "root_path",
+        "workspace_path"
+      ],
+      "ordering_fields": [
+        "artifacts"
+      ],
+      "generated_artifact_roles": [
+        "manifest",
+        "run_bundle"
+      ]
+    },
+    "artifacts": [
+      {
+        "schema_version": "canary_results@1",
+        "artifact_role": "canary_results",
+        "artifact_key": "canary-results",
+        "path": "runs/run-20260616-0001/canary/results.json",
+        "sha256": "1111111111111111111111111111111111111111111111111111111111111111"
+      },
+      {
+        "schema_version": "diff@1",
+        "artifact_role": "diff",
+        "artifact_key": "patch-diff",
+        "path": "runs/run-20260616-0001/diffs/changes.diff",
+        "sha256": "2222222222222222222222222222222222222222222222222222222222222222"
+      },
+      {
+        "schema_version": "dossier@1",
+        "artifact_role": "dossier",
+        "artifact_key": "human-dossier",
+        "path": "runs/run-20260616-0001/dossiers/summary.md",
+        "sha256": "3333333333333333333333333333333333333333333333333333333333333333"
+      },
+      {
+        "schema_version": "evidence@1",
+        "artifact_role": "evidence",
+        "artifact_key": "baseline-evidence",
+        "path": "runs/run-20260616-0001/baseline/evidence.json",
+        "sha256": "4444444444444444444444444444444444444444444444444444444444444444"
+      },
+      {
+        "schema_version": "gate@1",
+        "artifact_role": "gate",
+        "artifact_key": "gate-result",
+        "path": "runs/run-20260616-0001/gate/result.json",
+        "sha256": "5555555555555555555555555555555555555555555555555555555555555555"
+      },
+      {
+        "schema_version": "logs@1",
+        "artifact_role": "logs",
+        "artifact_key": "quality-logs",
+        "path": "runs/run-20260616-0001/logs/quality.log",
+        "sha256": "6666666666666666666666666666666666666666666666666666666666666666"
+      },
+      {
+        "schema_version": "pr_body@1",
+        "artifact_role": "pr_body",
+        "artifact_key": "pr-body",
+        "path": "runs/run-20260616-0001/report/pr-body.md",
+        "sha256": "7777777777777777777777777777777777777777777777777777777777777777"
+      },
+      {
+        "schema_version": "provenance@1",
+        "artifact_role": "provenance",
+        "artifact_key": "provenance",
+        "path": "runs/run-20260616-0001/provenance.json",
+        "sha256": "8888888888888888888888888888888888888888888888888888888888888888"
+      },
+      {
+        "schema_version": "quality_outputs@1",
+        "artifact_role": "quality_outputs",
+        "artifact_key": "quality-outputs",
+        "path": "runs/run-20260616-0001/results/quality.json",
+        "sha256": "9999999999999999999999999999999999999999999999999999999999999999"
+      },
+      {
+        "schema_version": "review@1",
+        "artifact_role": "review",
+        "artifact_key": "human-review",
+        "path": "runs/run-20260616-0001/review/review.json",
+        "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      }
+    ]
   },
   "artifacts": [
+    {
+      "schema_version": "canary_results@1",
+      "artifact_role": "canary_results",
+      "path": "runs/run-20260616-0001/canary/results.json",
+      "sha256": "1111111111111111111111111111111111111111111111111111111111111111"
+    },
+    {
+      "schema_version": "diff@1",
+      "artifact_role": "diff",
+      "path": "runs/run-20260616-0001/diffs/changes.diff",
+      "sha256": "2222222222222222222222222222222222222222222222222222222222222222"
+    },
+    {
+      "schema_version": "dossier@1",
+      "artifact_role": "dossier",
+      "path": "runs/run-20260616-0001/dossiers/summary.md",
+      "sha256": "3333333333333333333333333333333333333333333333333333333333333333"
+    },
     {
       "schema_version": "evidence@1",
       "artifact_role": "evidence",
       "path": "runs/run-20260616-0001/baseline/evidence.json",
-      "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+      "sha256": "4444444444444444444444444444444444444444444444444444444444444444"
+    },
+    {
+      "schema_version": "gate@1",
+      "artifact_role": "gate",
+      "path": "runs/run-20260616-0001/gate/result.json",
+      "sha256": "5555555555555555555555555555555555555555555555555555555555555555"
+    },
+    {
+      "schema_version": "logs@1",
+      "artifact_role": "logs",
+      "path": "runs/run-20260616-0001/logs/quality.log",
+      "sha256": "6666666666666666666666666666666666666666666666666666666666666666"
     },
     {
       "schema_version": "manifest@1",
@@ -27,16 +188,28 @@
       "sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
     },
     {
+      "schema_version": "pr_body@1",
+      "artifact_role": "pr_body",
+      "path": "runs/run-20260616-0001/report/pr-body.md",
+      "sha256": "7777777777777777777777777777777777777777777777777777777777777777"
+    },
+    {
       "schema_version": "provenance@1",
       "artifact_role": "provenance",
       "path": "runs/run-20260616-0001/provenance.json",
-      "sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+      "sha256": "8888888888888888888888888888888888888888888888888888888888888888"
     },
     {
-      "schema_version": "key_result@1",
-      "artifact_role": "key_result",
-      "path": "runs/run-20260616-0001/results/baseline.json",
-      "sha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+      "schema_version": "quality_outputs@1",
+      "artifact_role": "quality_outputs",
+      "path": "runs/run-20260616-0001/results/quality.json",
+      "sha256": "9999999999999999999999999999999999999999999999999999999999999999"
+    },
+    {
+      "schema_version": "review@1",
+      "artifact_role": "review",
+      "path": "runs/run-20260616-0001/review/review.json",
+      "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
     }
   ]
 }

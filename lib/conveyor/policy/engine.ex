@@ -71,7 +71,7 @@ defmodule Conveyor.Policy.Engine do
     findings =
       []
       |> add_autonomy_finding(profile, opts)
-      |> add_network_finding(command_decision, profile)
+      |> add_network_finding(command_decision, profile, opts)
       |> add_denylist_findings(command_decision, profile, profiles_doc)
       |> Enum.reverse()
 
@@ -170,20 +170,29 @@ defmodule Conveyor.Policy.Engine do
     end
   end
 
-  defp add_network_finding(findings, command_decision, profile) do
+  defp add_network_finding(findings, command_decision, profile, opts) do
     network =
       Map.get(command_decision, :network, Map.get(command_decision, "network", "disabled"))
 
     if Map.get(profile, "network_policy") == "deny_by_default" and network != "disabled" do
-      [
-        finding(
-          "unapproved_network",
-          "network access requires an explicit policy approval",
-          "command.network",
-          %{network: network, action: "block_execution"}
-        )
-        | findings
-      ]
+      network_decision =
+        opts
+        |> Keyword.put_new(:network, network)
+        |> Conveyor.Policy.NetworkEgress.evaluate()
+
+      if network_decision["status"] == "allowed" do
+        findings
+      else
+        [
+          finding(
+            "network_egress_blocked",
+            "network access requires explicit station policy approval for an external host",
+            "command.network",
+            %{network: network, action: "block_execution", network_decision: network_decision}
+          )
+          | findings
+        ]
+      end
     else
       findings
     end

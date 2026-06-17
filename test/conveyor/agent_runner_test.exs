@@ -168,6 +168,84 @@ defmodule Conveyor.AgentRunnerTest do
     end
   end
 
+  test "normalizes every adapter event into the Conveyor event envelope" do
+    raw_events =
+      Conveyor.AgentRunner.adapter_event_types()
+      |> Enum.with_index(1)
+      |> Enum.map(fn {event_type, index} ->
+        %{
+          type: event_type,
+          raw_ref: "adapter-raw://session-abc/#{index}",
+          payload: %{index: index, body: "payload #{index}"}
+        }
+      end)
+
+    events =
+      Conveyor.AgentRunner.normalize_adapter_events!(raw_events, event_context(),
+        start_sequence: 41
+      )
+
+    assert Enum.map(events, & &1["event_type"]) == Conveyor.AgentRunner.adapter_event_types()
+    assert Enum.map(events, & &1["seq"]) == Enum.to_list(41..54)
+
+    for event <- events do
+      assert event["event_version"] == Conveyor.AgentRunner.event_envelope_version()
+      assert event["run_spec_sha256"] == "sha256:run-spec-agent-events"
+      assert event["run_attempt_id"] == "run-attempt-agent-events"
+      assert event["agent_session_id"] == "agent-session-agent-events"
+      assert event["adapter"] == "codex"
+      assert event["adapter_session_id"] == "codex-session-abc"
+      assert event["raw_ref"] =~ "adapter-raw://session-abc/"
+
+      assert event["trace_context"] == %{
+               "parent_span_id" => "00f067aa0ba902b7",
+               "span_id" => "18bf92f3577b34d1",
+               "trace_id" => "4bf92f3577b34da6a3ce929d0e0e4736",
+               "traceparent" => "00-4bf92f3577b34da6a3ce929d0e0e4736-18bf92f3577b34d1-01"
+             }
+    end
+
+    assert List.first(events)["payload"] == %{"body" => "payload 1", "index" => 1}
+  end
+
+  test "emits a structured normalized event log" do
+    events =
+      Conveyor.AgentRunner.normalize_adapter_events!(
+        [
+          %{event_type: :session_started},
+          %{event_type: "message_delta"},
+          %{event_type: "session_completed"}
+        ],
+        event_context()
+      )
+
+    assert Conveyor.AgentRunner.normalized_event_log(events) == %{
+             "schema_version" => "conveyor.normalized_agent_event_log@1",
+             "matrix_ref" => "conveyor-quality-ci-evals-vmr.13",
+             "event_count" => 3,
+             "event_types" => ["session_started", "message_delta", "session_completed"],
+             "first_seq" => 1,
+             "last_seq" => 3,
+             "events" => events
+           }
+  end
+
+  test "adapter event normalization requires stable context and known event types" do
+    assert_raise ArgumentError, ~r/missing run_attempt_id/, fn ->
+      Conveyor.AgentRunner.normalize_adapter_events!(
+        [%{event_type: "session_started"}],
+        Map.delete(event_context(), :run_attempt_id)
+      )
+    end
+
+    assert_raise ArgumentError, ~r/unknown adapter event type/, fn ->
+      Conveyor.AgentRunner.normalize_adapter_events!(
+        [%{event_type: "unrecognized_adapter_event"}],
+        event_context()
+      )
+    end
+  end
+
   defp l1_capabilities do
     %{
       streaming_events: false,
@@ -208,5 +286,21 @@ defmodule Conveyor.AgentRunnerTest do
 
   defp digest_set do
     Map.new(Conveyor.Domain.RunSpec.digest_keys(), fn key -> {key, "sha256:#{key}-v1"} end)
+  end
+
+  defp event_context do
+    %{
+      run_spec_sha256: "sha256:run-spec-agent-events",
+      run_attempt_id: "run-attempt-agent-events",
+      agent_session_id: "agent-session-agent-events",
+      adapter: "codex",
+      adapter_session_id: "codex-session-abc",
+      trace_context: %{
+        trace_id: "4bf92f3577b34da6a3ce929d0e0e4736",
+        span_id: "18bf92f3577b34d1",
+        parent_span_id: "00f067aa0ba902b7",
+        traceparent: "00-4bf92f3577b34da6a3ce929d0e0e4736-18bf92f3577b34d1-01"
+      }
+    }
   end
 end

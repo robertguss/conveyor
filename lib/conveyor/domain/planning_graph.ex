@@ -271,10 +271,13 @@ defmodule Conveyor.Domain.PlanningGraph do
   end
 
   defp normalize_agent_brief!(brief, plan_id) do
+    brief_key = fetch_required!(brief, :id)
+
     %{
       "schema_version" => @brief_contract_version,
       "plan_id" => plan_id,
-      "id" => fetch_required!(brief, :id),
+      "id" => brief_key,
+      "brief_key" => brief_key,
       "title" => fetch_required!(brief, :title),
       "slice_id" => fetch_required!(brief, :slice_id),
       "version" => fetch_required!(brief, :version),
@@ -285,6 +288,20 @@ defmodule Conveyor.Domain.PlanningGraph do
       "locked" => Map.get(brief, :locked) || Map.get(brief, "locked") || false,
       "rerun_of" => Map.get(brief, :rerun_of) || Map.get(brief, "rerun_of")
     }
+    |> put_optional_brief_field(brief, :current_behavior)
+    |> put_optional_brief_field(brief, :desired_behavior)
+    |> put_optional_brief_field(brief, :key_interfaces)
+    |> put_optional_brief_field(brief, :acceptance_criteria_refs)
+    |> put_optional_brief_field(brief, :required_tests)
+    |> put_optional_brief_field(brief, :verification_commands)
+    |> put_optional_brief_field(brief, :out_of_scope)
+    |> put_optional_brief_field(brief, :risks)
+    |> put_optional_brief_field(brief, :non_goals)
+    |> put_optional_brief_field(brief, :allowed_write_paths)
+    |> put_optional_brief_field(brief, :protected_paths)
+    |> put_optional_brief_field(brief, :autonomy_level)
+    |> put_optional_brief_field(brief, :lock_metadata)
+    |> put_optional_brief_field(brief, :contract_digest)
   end
 
   defp create_record!(resource, external_id, name, payload) do
@@ -377,6 +394,13 @@ defmodule Conveyor.Domain.PlanningGraph do
 
   defp normalize_string_list!(_values, _opts) do
     raise ArgumentError, "planning graph refs must be non-empty lists"
+  end
+
+  defp put_optional_brief_field(payload, source, key) do
+    case Map.get(source, key, Map.get(source, to_string(key))) do
+      nil -> payload
+      value -> Map.put(payload, to_string(key), value)
+    end
   end
 
   defp fetch_required!(map, key) do

@@ -42,16 +42,108 @@ defmodule Conveyor.Artifacts.ProjectorTest do
 
     assert File.read!(projected_path) == bytes
     refute projected_path == artifact.blob_path
-    assert projection.root_digest =~ ~r/^sha256:[a-f0-9]{64}$/
+    assert projection.bundle_root_sha256 =~ ~r/^sha256:[a-f0-9]{64}$/
     assert projection.manifest["schema_version"] == "manifest@1"
     assert projection.run_bundle["schema_version"] == "run_bundle@1"
+    assert projection.run_bundle["bundle_root_sha256"] == projection.bundle_root_sha256
+    refute Map.has_key?(projection.run_bundle, "root_digest")
 
     assert [%{"path" => "runs/run-001/baseline/baseline-summary.json"}] =
              projection.manifest["artifacts"]
 
+    assert %{
+             "schema_version" => "conveyor.run_bundle_manifest@1",
+             "matrix_ref" => "conveyor-quality-ci-evals-vmr.13",
+             "artifact_count" => 1,
+             "excluded_fields" => excluded_fields,
+             "artifacts" => [
+               %{
+                 "artifact_role" => "evidence",
+                 "path" => "runs/run-001/baseline/baseline-summary.json"
+               }
+             ]
+           } = projection.run_bundle["canonical_manifest"]
+
+    assert "created_at" in excluded_fields["timestamp_fields"]
+    assert "blob_path" in excluded_fields["host_path_fields"]
+    assert "manifest" in excluded_fields["generated_artifact_roles"]
+
     assert Enum.any?(projection.ledger, &(&1.event_type == "artifact_blob_stored"))
     assert Enum.any?(projection.ledger, &(&1.event_type == "artifact_projected"))
     assert Enum.any?(projection.ledger, &(&1.event_type == "run_bundle_projected"))
+  end
+
+  test "bundle_root_sha256 excludes timestamps host paths and input ordering" do
+    first_backend = LocalDisk.new(root: tmp_root("canonical-first"))
+    second_backend = LocalDisk.new(root: tmp_root("canonical-second"))
+
+    first_evidence =
+      store_plain_artifact(
+        first_backend,
+        "evidence",
+        "evidence",
+        "evidence/evidence.json",
+        ~s({"status":"passed"})
+      )
+
+    first_dossier =
+      store_plain_artifact(
+        first_backend,
+        "dossier",
+        "dossier",
+        "dossiers/summary.md",
+        "human review dossier"
+      )
+
+    second_evidence =
+      store_plain_artifact(
+        second_backend,
+        "evidence",
+        "evidence",
+        "evidence/evidence.json",
+        ~s({"status":"passed"})
+      )
+
+    second_dossier =
+      store_plain_artifact(
+        second_backend,
+        "dossier",
+        "dossier",
+        "dossiers/summary.md",
+        "human review dossier"
+      )
+
+    assert first_evidence.blob_path != second_evidence.blob_path
+
+    assert {:ok, first_projection} =
+             LocalDisk.project_run(first_backend, %{
+               run_id: "run-canonical",
+               bundle_id: "bundle-canonical",
+               created_at: ~U[2026-06-16 21:40:00Z],
+               artifacts: [first_dossier, first_evidence]
+             })
+
+    assert {:ok, second_projection} =
+             LocalDisk.project_run(second_backend, %{
+               run_id: "run-canonical",
+               bundle_id: "bundle-canonical",
+               created_at: ~U[2026-06-17 21:40:00Z],
+               artifacts: [second_evidence, second_dossier]
+             })
+
+    assert first_projection.manifest["root_digest"] != second_projection.manifest["root_digest"]
+    assert first_projection.bundle_root_sha256 == second_projection.bundle_root_sha256
+
+    assert first_projection.run_bundle["canonical_manifest"] ==
+             second_projection.run_bundle["canonical_manifest"]
+
+    canonical_artifacts_json =
+      Jason.encode!(first_projection.run_bundle["canonical_manifest"]["artifacts"])
+
+    refute canonical_artifacts_json =~ first_backend.root
+    refute canonical_artifacts_json =~ second_backend.root
+    refute canonical_artifacts_json =~ "blob_path"
+    refute canonical_artifacts_json =~ "created_at"
   end
 
   test "blocks projection when stored blob bytes do not match recorded digest" do
@@ -206,6 +298,20 @@ defmodule Conveyor.Artifacts.ProjectorTest do
       "conveyor-artifact-projector",
       "#{System.unique_integer([:positive])}-#{name}"
     ])
+  end
+
+  defp store_plain_artifact(backend, key, role, path, bytes) do
+    assert {:ok, artifact} =
+             LocalDisk.put_artifact(backend, %{
+               artifact_key: key,
+               artifact_role: role,
+               projection_path: path,
+               schema_version: "#{role}@1",
+               content_type: "text/plain",
+               bytes: bytes
+             })
+
+    artifact
   end
 
   defp store_secret_artifacts(backend) do

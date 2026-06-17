@@ -1031,6 +1031,387 @@ end
 
 defmodule Conveyor.Domain.AgentBrief do
   use Conveyor.Domain.ActiveResource, table: "agent_briefs"
+
+  @schema_version "agent_brief@1"
+  @readiness_schema_version "conveyor.agent_brief_readiness@1"
+  @finding_schema_version "conveyor.agent_brief_readiness_finding@1"
+  @next_action_schema_version "conveyor.agent_brief_next_action@1"
+  @minimum_behavior_chars 32
+  @max_contract_bytes 12_000
+
+  def schema_version, do: @schema_version
+  def readiness_schema_version, do: @readiness_schema_version
+  def finding_schema_version, do: @finding_schema_version
+  def max_contract_bytes, do: @max_contract_bytes
+
+  def build!(attrs) when is_map(attrs) do
+    brief_key = required_string!(attrs, :brief_key, fallback: :id)
+    version = Conveyor.Domain.PayloadHelpers.fetch_required!(attrs, :version)
+
+    payload =
+      %{
+        "schema_version" => @schema_version,
+        "brief_key" => brief_key,
+        "id" => optional_string(attrs, :id, brief_key),
+        "version" => version,
+        "slice_id" => required_string!(attrs, :slice_id),
+        "title" => optional_string(attrs, :title, brief_key),
+        "current_behavior" => optional_string(attrs, :current_behavior, ""),
+        "desired_behavior" => optional_string(attrs, :desired_behavior, ""),
+        "key_interfaces" => optional_list(attrs, :key_interfaces),
+        "acceptance_criteria_refs" =>
+          optional_list(attrs, :acceptance_criteria_refs, :acceptance_refs),
+        "required_tests" => optional_list(attrs, :required_tests),
+        "verification_commands" => optional_list(attrs, :verification_commands, :command_specs),
+        "out_of_scope" => optional_list(attrs, :out_of_scope),
+        "risks" => optional_list(attrs, :risks, :risk_notes),
+        "non_goals" => optional_list(attrs, :non_goals),
+        "allowed_write_paths" => optional_list(attrs, :allowed_write_paths),
+        "protected_paths" => optional_list(attrs, :protected_paths),
+        "autonomy_level" => optional_string(attrs, :autonomy_level, "L1"),
+        "lock_metadata" => optional_map(attrs, :lock_metadata)
+      }
+      |> put_optional_string(attrs, :plan_id)
+      |> put_optional_string(attrs, :contract_version)
+      |> put_optional_string(attrs, :contract_lock_id)
+      |> put_optional_string(attrs, :rerun_of)
+      |> Map.put("locked", optional_bool(attrs, :locked, false))
+
+    Map.put(payload, "contract_digest", contract_digest(payload))
+  end
+
+  def create_attrs!(attrs) when is_map(attrs) do
+    payload = build!(attrs)
+
+    %{
+      external_id: agent_brief_key(payload),
+      name: payload["title"],
+      status: "active",
+      payload: payload
+    }
+  end
+
+  def readiness_report(brief_or_payload, _opts \\ []) when is_map(brief_or_payload) do
+    payload = payload(brief_or_payload)
+    contract_digest = contract_digest(payload)
+    findings = readiness_findings(payload, contract_digest)
+    ready? = findings == []
+
+    %{
+      schema_version: @readiness_schema_version,
+      category: "agent_brief_readiness",
+      status: if(ready?, do: "ready", else: "blocked"),
+      ready: ready?,
+      brief_key: Map.get(payload, "brief_key") || Map.get(payload, "id"),
+      version: Map.get(payload, "version"),
+      slice_id: Map.get(payload, "slice_id"),
+      contract_digest: contract_digest,
+      contract_bytes: contract_bytes(payload),
+      findings: findings,
+      next_actions: next_actions(findings)
+    }
+  end
+
+  def readiness_context(brief_or_payload) when is_map(brief_or_payload) do
+    payload = payload(brief_or_payload)
+    report = readiness_report(payload)
+
+    if report.ready do
+      {:ok,
+       %{
+         plan_ready: true,
+         readiness: "ready",
+         contract_locked: true,
+         contract_lock_id: contract_lock_id(payload, report.contract_digest),
+         artifact_refs: [report.contract_digest],
+         agent_brief_digest: report.contract_digest,
+         agent_brief_key: agent_brief_key(payload),
+         slice_id: report.slice_id
+       }}
+    else
+      {:error, report.findings}
+    end
+  end
+
+  def readiness_context!(brief_or_payload) when is_map(brief_or_payload) do
+    case readiness_context(brief_or_payload) do
+      {:ok, context} ->
+        context
+
+      {:error, findings} ->
+        codes = findings |> Enum.map(& &1.finding_code) |> Enum.join(", ")
+        raise ArgumentError, "AgentBrief is not ready: #{codes}"
+    end
+  end
+
+  def agent_brief_key(payload) when is_map(payload) do
+    payload = payload(payload)
+
+    "#{Map.get(payload, "brief_key") || Map.fetch!(payload, "id")}@#{Map.fetch!(payload, "version")}"
+  end
+
+  def contract_digest(payload) when is_map(payload) do
+    payload
+    |> payload()
+    |> Map.drop(["contract_digest", "readiness"])
+    |> Conveyor.Domain.PayloadHelpers.canonical_sha256()
+  end
+
+  defp readiness_findings(payload, expected_digest) do
+    []
+    |> maybe_finding(
+      vague_behavior?(payload),
+      "vague_agent_brief",
+      "vague",
+      "$.current_behavior",
+      "AgentBrief must describe current and desired behavior concretely.",
+      "Rewrite current_behavior and desired_behavior as reviewable behavior changes."
+    )
+    |> maybe_finding(
+      list_field(payload, "key_interfaces") == [],
+      "missing_key_interfaces",
+      "incomplete_contract",
+      "$.key_interfaces",
+      "AgentBrief must identify interfaces the agent may change or preserve.",
+      "Add key_interfaces entries for API, UI, CLI, schema, or storage boundaries."
+    )
+    |> maybe_finding(
+      list_field(payload, "acceptance_criteria_refs") == [],
+      "missing_acceptance_criteria_refs",
+      "incomplete_contract",
+      "$.acceptance_criteria_refs",
+      "AgentBrief must trace to acceptance criteria refs.",
+      "Add acceptance_criteria_refs that match the plan acceptance criteria."
+    )
+    |> maybe_finding(
+      testless?(payload),
+      "testless_agent_brief",
+      "testless",
+      "$.required_tests",
+      "AgentBrief must specify required tests and verification commands.",
+      "Add required_tests and verification_commands before marking the Slice ready."
+    )
+    |> maybe_finding(
+      list_field(payload, "out_of_scope") == [],
+      "missing_out_of_scope",
+      "incomplete_contract",
+      "$.out_of_scope",
+      "AgentBrief must state what the agent must not change.",
+      "Add out_of_scope entries that bound the implementation."
+    )
+    |> maybe_finding(
+      list_field(payload, "risks") == [],
+      "missing_risk_notes",
+      "incomplete_contract",
+      "$.risks",
+      "AgentBrief must identify risk and policy notes.",
+      "Add risks entries for behavior, data, security, or coordination concerns."
+    )
+    |> maybe_finding(
+      list_field(payload, "non_goals") == [],
+      "missing_non_goals",
+      "incomplete_contract",
+      "$.non_goals",
+      "AgentBrief must list non-goals separately from out-of-scope items.",
+      "Add non_goals entries for work the agent must not infer."
+    )
+    |> maybe_finding(
+      list_field(payload, "allowed_write_paths") == [] or
+        list_field(payload, "protected_paths") == [],
+      "missing_write_boundaries",
+      "incomplete_contract",
+      "$.allowed_write_paths",
+      "AgentBrief must declare allowed and protected paths.",
+      "Add allowed_write_paths and protected_paths for file reservation and review scope."
+    )
+    |> maybe_finding(
+      map_field(payload, "lock_metadata") == %{},
+      "missing_lock_metadata",
+      "incomplete_contract",
+      "$.lock_metadata",
+      "AgentBrief must record lock metadata before execution.",
+      "Add lock_metadata with a contract_lock_id, actor, timestamp, and reason."
+    )
+    |> maybe_finding(
+      contract_bytes(payload) > @max_contract_bytes,
+      "brief_too_large",
+      "too_large",
+      "$",
+      "AgentBrief is too large for a bounded implementation handoff.",
+      "Split the Slice or remove unrelated context until the AgentBrief is bounded."
+    )
+    |> maybe_finding(
+      stored_digest_mismatch?(payload, expected_digest),
+      "contract_digest_mismatch",
+      "digest_mismatch",
+      "$.contract_digest",
+      "AgentBrief contract digest does not match the normalized payload.",
+      "Regenerate the AgentBrief contract_digest from the normalized contract."
+    )
+  end
+
+  defp vague_behavior?(payload) do
+    Enum.any?(["current_behavior", "desired_behavior"], fn field ->
+      text = string_field(payload, field) || ""
+      String.length(text) < @minimum_behavior_chars
+    end)
+  end
+
+  defp testless?(payload),
+    do:
+      list_field(payload, "required_tests") == [] or
+        list_field(payload, "verification_commands") == []
+
+  defp stored_digest_mismatch?(payload, expected_digest) do
+    case Map.get(payload, "contract_digest") do
+      digest when is_binary(digest) and digest != "" -> digest != expected_digest
+      _other -> false
+    end
+  end
+
+  defp maybe_finding(findings, false, _code, _category, _path, _message, _action), do: findings
+
+  defp maybe_finding(findings, true, code, readiness_category, path, message, action) do
+    findings ++
+      [
+        %{
+          schema_version: @finding_schema_version,
+          category: "agent_brief_readiness",
+          finding_code: code,
+          readiness_category: readiness_category,
+          severity: "blocking",
+          path: path,
+          message: message,
+          next_actions: [
+            %{
+              schema_version: @next_action_schema_version,
+              label: action,
+              command: ["mix", "conveyor.plan_audit", "--agent-brief"]
+            }
+          ]
+        }
+      ]
+  end
+
+  defp next_actions(findings) do
+    findings
+    |> Enum.flat_map(& &1.next_actions)
+    |> Enum.uniq_by(fn action -> {action.label, action.command} end)
+  end
+
+  defp payload(%{payload: payload}) when is_map(payload),
+    do: Conveyor.Domain.PayloadHelpers.normalize_map(payload)
+
+  defp payload(payload) when is_map(payload),
+    do: Conveyor.Domain.PayloadHelpers.normalize_map(payload)
+
+  defp contract_bytes(payload) do
+    payload
+    |> payload()
+    |> Map.drop(["contract_digest", "readiness"])
+    |> Jason.encode!()
+    |> byte_size()
+  end
+
+  defp contract_lock_id(payload, contract_digest) do
+    lock_metadata = map_field(payload, "lock_metadata")
+
+    string_field(payload, "contract_lock_id") ||
+      string_field(lock_metadata, "contract_lock_id") ||
+      string_field(lock_metadata, "lock_id") ||
+      "agent-brief:#{contract_digest}"
+  end
+
+  defp required_string!(attrs, key, opts \\ []) do
+    value = Conveyor.Domain.PayloadHelpers.get(attrs, key)
+
+    value =
+      if value == nil and Keyword.has_key?(opts, :fallback) do
+        Conveyor.Domain.PayloadHelpers.get(attrs, Keyword.fetch!(opts, :fallback))
+      else
+        value
+      end
+
+    case value do
+      value when is_binary(value) and value != "" -> value
+      value when value not in [nil, ""] -> to_string(value)
+      _other -> raise ArgumentError, "missing required payload field: #{key}"
+    end
+  end
+
+  defp optional_string(attrs, key, default) do
+    case Conveyor.Domain.PayloadHelpers.get(attrs, key) do
+      value when is_binary(value) -> value
+      nil -> default
+      value -> to_string(value)
+    end
+  end
+
+  defp put_optional_string(payload, attrs, key) do
+    case Conveyor.Domain.PayloadHelpers.get(attrs, key) do
+      value when is_binary(value) and value != "" -> Map.put(payload, to_string(key), value)
+      nil -> payload
+      value -> Map.put(payload, to_string(key), to_string(value))
+    end
+  end
+
+  defp optional_bool(attrs, key, default) do
+    case Conveyor.Domain.PayloadHelpers.get(attrs, key, default) do
+      value when value in [true, false] -> value
+      "true" -> true
+      "false" -> false
+      _other -> default
+    end
+  end
+
+  defp optional_list(attrs, key, fallback \\ nil) do
+    value =
+      case Conveyor.Domain.PayloadHelpers.get(attrs, key) do
+        nil when fallback != nil -> Conveyor.Domain.PayloadHelpers.get(attrs, fallback, [])
+        nil -> []
+        value -> value
+      end
+
+    case value do
+      values when is_list(values) -> Conveyor.Domain.PayloadHelpers.normalize_list(values)
+      value when value in [nil, ""] -> []
+      value -> [Conveyor.Domain.PayloadHelpers.normalize_payload(value)]
+    end
+  end
+
+  defp optional_map(attrs, key) do
+    case Conveyor.Domain.PayloadHelpers.get(attrs, key, %{}) do
+      value when is_map(value) -> Conveyor.Domain.PayloadHelpers.normalize_map(value)
+      _other -> %{}
+    end
+  end
+
+  defp list_field(map, key) when is_map(map) do
+    case Map.get(map, key) do
+      values when is_list(values) -> Enum.reject(values, &blank?/1)
+      _other -> []
+    end
+  end
+
+  defp map_field(map, key) when is_map(map) do
+    case Map.get(map, key) do
+      value when is_map(value) -> value
+      _other -> %{}
+    end
+  end
+
+  defp string_field(map, key) when is_map(map) do
+    case Map.get(map, key) do
+      value when is_binary(value) and value != "" -> value
+      value when value not in [nil, ""] -> to_string(value)
+      _other -> nil
+    end
+  end
+
+  defp blank?(value) when is_binary(value), do: String.trim(value) == ""
+  defp blank?(value) when is_list(value), do: value == []
+  defp blank?(nil), do: true
+  defp blank?(_value), do: false
 end
 
 defmodule Conveyor.Domain.ContractLock do
@@ -1848,38 +2229,60 @@ defmodule Conveyor.Domain.RunBundle do
   use Conveyor.Domain.ActiveResource, table: "run_bundles"
 
   @schema_version "conveyor.run_bundle@1"
+  @canonical_manifest_schema_version "conveyor.run_bundle_manifest@1"
+  @matrix_ref "conveyor-quality-ci-evals-vmr.13"
+  @generated_artifact_roles ["manifest", "run_bundle"]
+  @excluded_fields %{
+    "timestamp_fields" => ["created_at", "generated_at", "inserted_at", "updated_at"],
+    "host_path_fields" => [
+      "absolute_path",
+      "blob_path",
+      "host_path",
+      "redacted_blob_path",
+      "root_path",
+      "workspace_path"
+    ],
+    "ordering_fields" => ["artifacts"],
+    "generated_artifact_roles" => @generated_artifact_roles
+  }
 
   def build!(attrs) when is_map(attrs) do
-    artifacts =
+    bundle_key = Conveyor.Domain.PayloadHelpers.fetch_required!(attrs, :bundle_key)
+    run_spec_sha256 = Conveyor.Domain.PayloadHelpers.fetch_required!(attrs, :run_spec_sha256)
+
+    canonical_manifest =
       attrs
-      |> Conveyor.Domain.PayloadHelpers.fetch_required!(:artifacts)
-      |> Enum.map(&artifact_sha256!/1)
+      |> Map.put(:bundle_key, bundle_key)
+      |> Map.put(:run_spec_sha256, run_spec_sha256)
+      |> canonical_manifest!()
+
+    artifact_sha256s =
+      canonical_manifest
+      |> Map.fetch!("artifacts")
+      |> Enum.map(&Map.fetch!(&1, "sha256"))
       |> Enum.sort()
 
     unsigned = %{
       "schema_version" => @schema_version,
-      "bundle_key" => Conveyor.Domain.PayloadHelpers.fetch_required!(attrs, :bundle_key),
-      "run_spec_sha256" =>
-        Conveyor.Domain.PayloadHelpers.fetch_required!(attrs, :run_spec_sha256),
-      "artifact_sha256s" => artifacts,
+      "bundle_key" => bundle_key,
+      "run_spec_sha256" => run_spec_sha256,
+      "artifact_sha256s" => artifact_sha256s,
+      "canonical_manifest" => canonical_manifest,
+      "excluded_fields" => excluded_fields(),
       "metadata" =>
         attrs
         |> Map.get(:metadata, Map.get(attrs, "metadata", %{}))
         |> Conveyor.Domain.PayloadHelpers.normalize_map()
     }
 
-    Map.put(
-      unsigned,
-      "run_bundle_sha256",
-      Conveyor.Domain.PayloadHelpers.canonical_sha256(unsigned)
-    )
+    Map.put(unsigned, "bundle_root_sha256", bundle_root_sha256(canonical_manifest))
   end
 
   def create_attrs!(attrs) when is_map(attrs) do
     payload = build!(attrs)
 
     %{
-      external_id: payload["run_bundle_sha256"],
+      external_id: payload["bundle_root_sha256"],
       name: payload["bundle_key"],
       status: "active",
       payload: payload
@@ -1891,17 +2294,174 @@ defmodule Conveyor.Domain.RunBundle do
       schema_version: "conveyor.run_bundle_summary@1",
       category: "run_bundle_projection",
       bundle_key: payload["bundle_key"],
-      run_bundle_sha256: payload["run_bundle_sha256"],
+      bundle_root_sha256: payload["bundle_root_sha256"],
       run_spec_sha256: payload["run_spec_sha256"],
       artifact_count: length(payload["artifact_sha256s"] || [])
     }
   end
 
-  defp artifact_sha256!(artifact) when is_binary(artifact), do: artifact
+  def canonical_manifest!(attrs) when is_map(attrs) do
+    artifacts =
+      attrs
+      |> Conveyor.Domain.PayloadHelpers.fetch_required!(:artifacts)
+      |> Enum.flat_map(&canonical_artifact_entries!/1)
+      |> sort_artifact_entries()
 
-  defp artifact_sha256!(artifact) when is_map(artifact) do
-    Map.get(artifact, "sha256") || Map.get(artifact, :sha256) ||
-      raise ArgumentError, "artifact is missing sha256"
+    if artifacts == [] do
+      raise ArgumentError, "RunBundle canonical manifest requires non-generated artifacts"
+    end
+
+    %{
+      "schema_version" => @canonical_manifest_schema_version,
+      "matrix_ref" => @matrix_ref,
+      "identity" => bundle_identity!(attrs),
+      "artifact_count" => length(artifacts),
+      "excluded_fields" => excluded_fields(),
+      "artifacts" => artifacts
+    }
+  end
+
+  def bundle_root_sha256(canonical_manifest) when is_map(canonical_manifest) do
+    Conveyor.Domain.PayloadHelpers.canonical_sha256(canonical_manifest)
+  end
+
+  def excluded_fields do
+    @excluded_fields
+  end
+
+  def sort_artifact_entries(entries) when is_list(entries) do
+    Enum.sort_by(entries, fn entry ->
+      [
+        Map.get(entry, "artifact_role", ""),
+        Map.get(entry, "artifact_key", ""),
+        Map.get(entry, "path", ""),
+        Map.get(entry, "sha256", ""),
+        Map.get(entry, "schema_version", "")
+      ]
+    end)
+  end
+
+  defp canonical_artifact_entries!(artifact) when is_binary(artifact) do
+    [
+      %{
+        "schema_version" => "evidence@1",
+        "artifact_role" => "evidence",
+        "sha256" => artifact
+      }
+    ]
+  end
+
+  defp canonical_artifact_entries!(artifact) when is_map(artifact) do
+    role = artifact_role(artifact)
+
+    if role in @generated_artifact_roles do
+      []
+    else
+      sha256 =
+        Map.get(artifact, "sha256") || Map.get(artifact, :sha256) ||
+          raise ArgumentError, "artifact is missing sha256"
+
+      entry =
+        %{
+          "schema_version" => artifact_schema_version(artifact, role),
+          "artifact_role" => role,
+          "sha256" => sha256
+        }
+        |> put_if_present(
+          "artifact_key",
+          Map.get(artifact, "artifact_key") || Map.get(artifact, :artifact_key)
+        )
+        |> put_if_present("path", canonical_path(artifact))
+        |> put_if_present(
+          "raw_sha256",
+          Map.get(artifact, "raw_sha256") || Map.get(artifact, :raw_sha256)
+        )
+        |> put_if_present(
+          "redacted_sha256",
+          Map.get(artifact, "redacted_sha256") || Map.get(artifact, :redacted_sha256)
+        )
+        |> put_if_present(
+          "content_type",
+          Map.get(artifact, "content_type") || Map.get(artifact, :content_type)
+        )
+        |> put_if_present(
+          "sensitivity",
+          Map.get(artifact, "sensitivity") || Map.get(artifact, :sensitivity)
+        )
+        |> put_if_present(
+          "quarantined",
+          Map.get(artifact, "quarantined") || Map.get(artifact, :quarantined)
+        )
+        |> put_if_present(
+          "projection_mode",
+          Map.get(artifact, "projection_mode") || Map.get(artifact, :projection_mode)
+        )
+        |> put_if_present(
+          "export_policy",
+          Map.get(artifact, "export_policy") || Map.get(artifact, :export_policy)
+        )
+        |> put_if_present(
+          "size_bytes",
+          Map.get(artifact, "size_bytes") || Map.get(artifact, :size_bytes)
+        )
+
+      [entry]
+    end
+  end
+
+  defp canonical_artifact_entries!(_artifact) do
+    raise ArgumentError, "RunBundle artifacts must be maps or sha256 strings"
+  end
+
+  defp bundle_identity!(attrs) do
+    %{}
+    |> put_if_present("bundle_key", Map.get(attrs, :bundle_key) || Map.get(attrs, "bundle_key"))
+    |> put_if_present("bundle_id", Map.get(attrs, :bundle_id) || Map.get(attrs, "bundle_id"))
+    |> put_if_present("run_id", Map.get(attrs, :run_id) || Map.get(attrs, "run_id"))
+    |> put_if_present(
+      "run_spec_sha256",
+      Map.get(attrs, :run_spec_sha256) || Map.get(attrs, "run_spec_sha256")
+    )
+    |> case do
+      identity when map_size(identity) > 0 ->
+        identity
+
+      _identity ->
+        raise ArgumentError, "RunBundle canonical manifest requires bundle identity"
+    end
+  end
+
+  defp artifact_role(artifact) do
+    Map.get(artifact, "artifact_role") || Map.get(artifact, :artifact_role) || "evidence"
+  end
+
+  defp artifact_schema_version(artifact, role) do
+    Map.get(artifact, "schema_version") || Map.get(artifact, :schema_version) || "#{role}@1"
+  end
+
+  defp canonical_path(artifact) do
+    path = Map.get(artifact, "path") || Map.get(artifact, :path)
+    projection_path = Map.get(artifact, "projection_path") || Map.get(artifact, :projection_path)
+
+    cond do
+      relative_path?(path) -> path
+      relative_path?(projection_path) -> projection_path
+      true -> nil
+    end
+  end
+
+  defp relative_path?(path) when is_binary(path) do
+    Path.type(path) == :relative and not String.starts_with?(path, "../") and
+      not String.contains?(path, "/../")
+  end
+
+  defp relative_path?(_path), do: false
+
+  defp put_if_present(map, _key, nil), do: map
+  defp put_if_present(map, _key, ""), do: map
+
+  defp put_if_present(map, key, value) do
+    Map.put(map, key, Conveyor.Domain.PayloadHelpers.normalize_payload(value))
   end
 end
 

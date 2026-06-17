@@ -167,7 +167,7 @@ defmodule Conveyor.Artifacts.Projector.LocalDisk do
          schema_version: "conveyor.artifact_projection@1",
          run_id: run_id,
          bundle_id: bundle_id,
-         root_digest: run_bundle["root_digest"],
+         bundle_root_sha256: run_bundle["bundle_root_sha256"],
          manifest: manifest,
          run_bundle: run_bundle,
          redaction_report: projection_redaction_report(verified_artifacts),
@@ -181,7 +181,7 @@ defmodule Conveyor.Artifacts.Projector.LocalDisk do
                ledger_event("run_bundle_projected", %{
                  run_id: run_id,
                  bundle_id: bundle_id,
-                 root_digest: run_bundle["root_digest"],
+                 bundle_root_sha256: run_bundle["bundle_root_sha256"],
                  manifest_path: manifest_path,
                  run_bundle_path: run_bundle_path
                })
@@ -504,6 +504,8 @@ defmodule Conveyor.Artifacts.Projector.LocalDisk do
   end
 
   defp write_manifest(backend, run_id, bundle_id, created_at, artifact_entries) do
+    artifact_entries = Conveyor.Domain.RunBundle.sort_artifact_entries(artifact_entries)
+
     unsigned = %{
       "schema_version" => @manifest_schema,
       "manifest_id" => "#{bundle_id}-manifest",
@@ -536,22 +538,34 @@ defmodule Conveyor.Artifacts.Projector.LocalDisk do
       "sha256" => manifest_sha256
     }
 
-    artifact_entries = projected_entries ++ [manifest_entry]
+    artifact_entries =
+      projected_entries
+      |> Kernel.++([manifest_entry])
+      |> Conveyor.Domain.RunBundle.sort_artifact_entries()
+
+    canonical_manifest =
+      Conveyor.Domain.RunBundle.canonical_manifest!(%{
+        bundle_id: bundle_id,
+        run_id: run_id,
+        artifacts: artifact_entries
+      })
 
     unsigned = %{
       "schema_version" => @run_bundle_schema,
       "bundle_id" => bundle_id,
       "run_id" => run_id,
       "created_at" => created_at,
+      "bundle_root_sha256" => Conveyor.Domain.RunBundle.bundle_root_sha256(canonical_manifest),
+      "canonical_manifest" => canonical_manifest,
+      "excluded_fields" => Conveyor.Domain.RunBundle.excluded_fields(),
       "artifact_schema_versions" => artifact_schema_versions(artifact_entries),
       "artifacts" => artifact_entries
     }
 
-    run_bundle = Map.put(unsigned, "root_digest", canonical_sha256(unsigned))
     path = Path.join(run_root(backend, run_id), "run_bundle.json")
-    File.write!(path, encode_json(run_bundle))
+    File.write!(path, encode_json(unsigned))
 
-    {:ok, run_bundle, path}
+    {:ok, unsigned, path}
   end
 
   defp artifact_schema_version(%{schema_version: schema_version})
