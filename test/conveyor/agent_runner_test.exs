@@ -230,6 +230,113 @@ defmodule Conveyor.AgentRunnerTest do
            }
   end
 
+  test "fake adapter declares deterministic CI capabilities without credentials" do
+    snapshot =
+      Conveyor.AgentRunner.FakeAdapter.capability_snapshot(%{
+        agent_profile_id: "fake-implementer",
+        role: "implementer"
+      })
+
+    assert snapshot["adapter"] == "fake"
+    assert snapshot["effective_autonomy_ceiling"] == "L2"
+    assert snapshot["capabilities"]["streaming_events"]
+    assert snapshot["capabilities"]["structured_output"]
+    assert snapshot["capabilities"]["cancellation"]
+    assert "no provider credentials" in snapshot["known_limitations"]
+  end
+
+  test "fake adapter produces deterministic implementer and reviewer fixture replays" do
+    for scenario <- Conveyor.AgentRunner.fake_scenarios(),
+        role <- ["implementer", "reviewer"] do
+      replay =
+        Conveyor.AgentRunner.fake_scenario_replay_log!(scenario, fake_event_context(),
+          role: role,
+          start_sequence: 9
+        )
+
+      event_log = replay["event_log"]
+
+      assert replay["schema_version"] == "conveyor.fake_agent_runner_replay@1"
+      assert replay["scenario"] == scenario
+      assert replay["role"] == role
+      assert replay["credential_requirement"] == "none"
+      assert event_log["schema_version"] == "conveyor.normalized_agent_event_log@1"
+      assert event_log["matrix_ref"] == "conveyor-quality-ci-evals-vmr.13"
+      assert event_log["first_seq"] == 9
+      assert event_log["last_seq"] == 8 + event_log["event_count"]
+      assert "session_started" in event_log["event_types"]
+      assert "final_response" in event_log["event_types"]
+      assert "session_completed" in event_log["event_types"]
+
+      for event <- event_log["events"] do
+        assert event["event_version"] == Conveyor.AgentRunner.event_envelope_version()
+        assert event["run_spec_sha256"] == "sha256:run-spec-agent-events"
+        assert event["run_attempt_id"] == "run-attempt-agent-events"
+        assert event["agent_session_id"] == "agent-session-agent-events"
+        assert event["adapter"] == "fake"
+        assert event["adapter_session_id"] == "fake-session-replay"
+        assert event["payload"]["role"] in [role, nil]
+      end
+    end
+  end
+
+  test "fake scenarios cover all deterministic outcomes" do
+    summaries =
+      Map.new(Conveyor.AgentRunner.fake_scenarios(), fn scenario ->
+        replay = Conveyor.AgentRunner.fake_scenario_replay_log!(scenario, event_context())
+        {scenario, replay["event_log"]["events"]}
+      end)
+
+    assert event_payload(summaries, "known_good_patch", "file_change_observed")["patch_label"] ==
+             "known_good"
+
+    assert event_payload(summaries, "labeled_bad_patch", "file_change_observed")[
+             "patch_label"
+           ] ==
+             "bad_patch_missing_acceptance"
+
+    assert event_payload(summaries, "malformed_output", "adapter_error")["failure_category"] ==
+             "malformed_output"
+
+    assert event_payload(summaries, "timeout", "adapter_error")["failure_category"] == "timeout"
+    assert Enum.any?(summaries["cancellation"], &(&1["event_type"] == "cancel_acknowledged"))
+    assert event_payload(summaries, "no_diff", "message_completed")["patch_label"] == "no_diff"
+  end
+
+  test "fake adapter callbacks replay scenarios without live provider state" do
+    run_spec = %{"run_spec_sha256" => "sha256:fake-run-spec-callbacks"}
+    profile = %{agent_profile_id: "fake-callbacks", scenario: "known_good_patch"}
+
+    assert {:ok, first} =
+             Conveyor.AgentRunner.FakeAdapter.start_session(run_spec, profile,
+               role: "implementer"
+             )
+
+    assert {:ok, second} =
+             Conveyor.AgentRunner.FakeAdapter.start_session(run_spec, profile,
+               role: "implementer"
+             )
+
+    assert first.adapter_session_id == second.adapter_session_id
+    assert first.credential_requirement == "none"
+    assert {:ok, events} = Conveyor.AgentRunner.FakeAdapter.stream_events(first, [])
+
+    assert Enum.map(events, & &1.event_type) == [
+             "session_started",
+             "file_change_observed",
+             "final_response",
+             "session_completed"
+           ]
+
+    assert {:ok, diff} = Conveyor.AgentRunner.FakeAdapter.capture_diff(first, [])
+    assert diff["status"] == "changed"
+    assert diff["diff_sha256"] == "sha256:fake-known-good-patch"
+    assert {:ok, cost} = Conveyor.AgentRunner.FakeAdapter.cost_report(first, [])
+    assert cost["total_usd"] == "0.00"
+    assert cost["credential_requirement"] == "none"
+    assert :ok = Conveyor.AgentRunner.FakeAdapter.cancel(first, :test_cancel)
+  end
+
   test "adapter event normalization requires stable context and known event types" do
     assert_raise ArgumentError, ~r/missing run_attempt_id/, fn ->
       Conveyor.AgentRunner.normalize_adapter_events!(
@@ -288,6 +395,13 @@ defmodule Conveyor.AgentRunnerTest do
     Map.new(Conveyor.Domain.RunSpec.digest_keys(), fn key -> {key, "sha256:#{key}-v1"} end)
   end
 
+  defp event_payload(summaries, scenario, event_type) do
+    summaries
+    |> Map.fetch!(scenario)
+    |> Enum.find(&(&1["event_type"] == event_type))
+    |> Map.fetch!("payload")
+  end
+
   defp event_context do
     %{
       run_spec_sha256: "sha256:run-spec-agent-events",
@@ -302,5 +416,11 @@ defmodule Conveyor.AgentRunnerTest do
         traceparent: "00-4bf92f3577b34da6a3ce929d0e0e4736-18bf92f3577b34d1-01"
       }
     }
+  end
+
+  defp fake_event_context do
+    event_context()
+    |> Map.put(:adapter, "fake")
+    |> Map.put(:adapter_session_id, "fake-session-replay")
   end
 end

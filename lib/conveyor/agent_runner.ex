@@ -12,7 +12,16 @@ defmodule Conveyor.AgentRunner do
   @event_envelope_version "conveyor.agent_event@1"
   @event_log_schema_version "conveyor.normalized_agent_event_log@1"
   @event_matrix_ref "conveyor-quality-ci-evals-vmr.13"
+  @fake_replay_schema_version "conveyor.fake_agent_runner_replay@1"
   @autonomy_levels ["L0", "L1", "L2", "L3", "L4"]
+  @fake_scenarios [
+    "known_good_patch",
+    "labeled_bad_patch",
+    "malformed_output",
+    "timeout",
+    "cancellation",
+    "no_diff"
+  ]
 
   @adapter_event_types [
     "session_started",
@@ -108,6 +117,8 @@ defmodule Conveyor.AgentRunner do
   def adapter_event_types, do: @adapter_event_types
   def capability_keys, do: @capability_keys
   def autonomy_levels, do: @autonomy_levels
+  def fake_replay_schema_version, do: @fake_replay_schema_version
+  def fake_scenarios, do: @fake_scenarios
 
   def capability_snapshot(profile, opts \\ []) when is_map(profile) and is_list(opts) do
     capabilities = profile |> get(:capabilities, %{}) |> normalize_capabilities!()
@@ -281,6 +292,22 @@ defmodule Conveyor.AgentRunner do
     }
   end
 
+  def fake_scenario_replay_log!(scenario, context, opts \\ [])
+      when is_map(context) and is_list(opts) do
+    scenario = normalize_fake_scenario!(scenario)
+    role = opts |> Keyword.get(:role, "implementer") |> normalize_fake_role!()
+    raw_events = __MODULE__.FakeAdapter.scenario_events!(scenario, role: role)
+    normalized_events = normalize_adapter_events!(raw_events, context, opts)
+
+    %{
+      "schema_version" => @fake_replay_schema_version,
+      "scenario" => scenario,
+      "role" => role,
+      "credential_requirement" => "none",
+      "event_log" => normalized_event_log(normalized_events)
+    }
+  end
+
   def theoretical_autonomy_ceiling(capabilities) when is_map(capabilities) do
     normalized = normalize_capabilities!(capabilities)
 
@@ -305,6 +332,326 @@ defmodule Conveyor.AgentRunner do
 
     Enum.find_index(@autonomy_levels, &(&1 == level)) ||
       raise ArgumentError, "unknown autonomy level: #{inspect(level)}"
+  end
+
+  defmodule FakeAdapter do
+    @moduledoc """
+    Deterministic local adapter for CI, demos, and fixture replay.
+    """
+
+    @behaviour Conveyor.AgentRunner
+
+    @impl Conveyor.AgentRunner
+    def capability_snapshot(profile, opts \\ []) do
+      profile
+      |> Map.put_new(:agent_profile_id, "fake-agent-runner")
+      |> Map.put_new(:adapter, "fake")
+      |> Map.put_new(:autonomy_ceiling, "L2")
+      |> Map.put_new(:capabilities, %{
+        streaming_events: true,
+        pre_exec_command_policy: true,
+        cancellation: true,
+        diff_capture: true,
+        cost_reporting: true,
+        mcp_support: false,
+        slash_commands: false,
+        structured_output: true,
+        session_resume: true
+      })
+      |> Map.put_new(:known_limitations, [
+        "deterministic fixture runner only",
+        "no provider credentials",
+        "no live model calls"
+      ])
+      |> Conveyor.AgentRunner.capability_snapshot(opts)
+    end
+
+    @impl Conveyor.AgentRunner
+    def start_session(run_spec, profile, opts) do
+      scenario =
+        opts
+        |> Keyword.get(:scenario, get(profile, :scenario, "known_good_patch"))
+        |> Conveyor.AgentRunner.normalize_fake_scenario!()
+
+      role =
+        opts
+        |> Keyword.get(:role, get(profile, :role, "implementer"))
+        |> Conveyor.AgentRunner.normalize_fake_role!()
+
+      run_spec_sha256 = get(run_spec, :run_spec_sha256, "sha256:fake-run-spec")
+
+      {:ok,
+       %{
+         adapter: "fake",
+         adapter_session_id: deterministic_id("fake-session", [run_spec_sha256, scenario, role]),
+         run_spec_sha256: run_spec_sha256,
+         scenario: scenario,
+         role: role,
+         credential_requirement: "none",
+         profile: profile
+       }}
+    end
+
+    @impl Conveyor.AgentRunner
+    def stream_events(session, _opts) do
+      {:ok, scenario_events!(Map.fetch!(session, :scenario), role: Map.fetch!(session, :role))}
+    end
+
+    @impl Conveyor.AgentRunner
+    def request_command(session, command_request, _opts) do
+      {:ok,
+       %{
+         "adapter" => "fake",
+         "adapter_session_id" => Map.fetch!(session, :adapter_session_id),
+         "decision" => "allowed",
+         "command_request" => normalize_string_key_map(command_request)
+       }}
+    end
+
+    @impl Conveyor.AgentRunner
+    def cancel(_session, _reason), do: :ok
+
+    @impl Conveyor.AgentRunner
+    def capture_diff(session, _opts) do
+      {:ok, diff_for(Map.fetch!(session, :scenario))}
+    end
+
+    @impl Conveyor.AgentRunner
+    def cost_report(session, _opts) do
+      {:ok,
+       %{
+         "adapter" => "fake",
+         "adapter_session_id" => Map.fetch!(session, :adapter_session_id),
+         "total_usd" => "0.00",
+         "credential_requirement" => "none"
+       }}
+    end
+
+    @impl Conveyor.AgentRunner
+    def resume_session(session_ref, _opts), do: {:ok, session_ref}
+
+    def scenario_events!(scenario, opts \\ []) do
+      scenario = Conveyor.AgentRunner.normalize_fake_scenario!(scenario)
+
+      role =
+        opts |> Keyword.get(:role, "implementer") |> Conveyor.AgentRunner.normalize_fake_role!()
+
+      [
+        %{event_type: "session_started", payload: base_payload(scenario, role)},
+        scenario_event(scenario, role),
+        final_response_event(scenario, role),
+        session_completed_event(scenario)
+      ]
+      |> List.flatten()
+    end
+
+    defp scenario_event("known_good_patch", role) do
+      %{
+        event_type: "file_change_observed",
+        payload: %{
+          role: role,
+          patch_label: "known_good",
+          files: ["sample_apps/fastapi_tasks/app/main.py"],
+          diff_sha256: "sha256:fake-known-good-patch"
+        }
+      }
+    end
+
+    defp scenario_event("labeled_bad_patch", role) do
+      %{
+        event_type: "file_change_observed",
+        payload: %{
+          role: role,
+          patch_label: "bad_patch_missing_acceptance",
+          files: ["sample_apps/fastapi_tasks/app/main.py"],
+          diff_sha256: "sha256:fake-labeled-bad-patch"
+        }
+      }
+    end
+
+    defp scenario_event("malformed_output", role) do
+      %{
+        event_type: "adapter_error",
+        payload: %{
+          role: role,
+          failure_category: "malformed_output",
+          malformed_field: "final_response",
+          deterministic: true
+        }
+      }
+    end
+
+    defp scenario_event("timeout", role) do
+      [
+        %{event_type: "heartbeat", payload: %{role: role, status: "waiting_for_adapter"}},
+        %{
+          event_type: "adapter_error",
+          payload: %{role: role, failure_category: "timeout", timeout_ms: 30_000}
+        }
+      ]
+    end
+
+    defp scenario_event("cancellation", role) do
+      [
+        %{event_type: "cancel_requested", payload: %{role: role, reason: "fixture_cancel"}},
+        %{event_type: "cancel_acknowledged", payload: %{role: role, reason: "fixture_cancel"}}
+      ]
+    end
+
+    defp scenario_event("no_diff", role) do
+      %{
+        event_type: "message_completed",
+        payload: %{role: role, patch_label: "no_diff", files: [], diff_sha256: nil}
+      }
+    end
+
+    defp final_response_event("malformed_output", role) do
+      %{
+        event_type: "final_response",
+        payload: %{role: role, output_valid: false, body: "<<malformed-fixture-output>>"}
+      }
+    end
+
+    defp final_response_event(scenario, "reviewer") do
+      %{
+        event_type: "final_response",
+        payload: %{
+          role: "reviewer",
+          scenario: scenario,
+          reviewer_verdict: reviewer_verdict(scenario),
+          deterministic: true
+        }
+      }
+    end
+
+    defp final_response_event(scenario, role) do
+      %{
+        event_type: "final_response",
+        payload: %{
+          role: role,
+          scenario: scenario,
+          summary: "fake #{role} completed #{scenario}",
+          deterministic: true
+        }
+      }
+    end
+
+    defp session_completed_event(scenario) do
+      %{
+        event_type: "session_completed",
+        payload: %{status: completion_status(scenario), scenario: scenario}
+      }
+    end
+
+    defp base_payload(scenario, role) do
+      %{
+        scenario: scenario,
+        role: role,
+        adapter: "fake",
+        credential_requirement: "none"
+      }
+    end
+
+    defp completion_status(scenario) when scenario in ["malformed_output", "timeout"],
+      do: "failed"
+
+    defp completion_status("cancellation"), do: "cancelled"
+    defp completion_status(_scenario), do: "completed"
+
+    defp reviewer_verdict("known_good_patch"), do: "approved"
+    defp reviewer_verdict("no_diff"), do: "needs_changes"
+    defp reviewer_verdict("cancellation"), do: "cancelled"
+    defp reviewer_verdict(_scenario), do: "rejected"
+
+    defp diff_for("known_good_patch") do
+      %{
+        "status" => "changed",
+        "patch_label" => "known_good",
+        "diff_sha256" => "sha256:fake-known-good-patch",
+        "files" => ["sample_apps/fastapi_tasks/app/main.py"]
+      }
+    end
+
+    defp diff_for("labeled_bad_patch") do
+      %{
+        "status" => "changed",
+        "patch_label" => "bad_patch_missing_acceptance",
+        "diff_sha256" => "sha256:fake-labeled-bad-patch",
+        "files" => ["sample_apps/fastapi_tasks/app/main.py"]
+      }
+    end
+
+    defp diff_for("no_diff") do
+      %{"status" => "no_diff", "patch_label" => "no_diff", "diff_sha256" => nil, "files" => []}
+    end
+
+    defp diff_for(scenario) do
+      %{"status" => "unavailable", "patch_label" => scenario, "diff_sha256" => nil, "files" => []}
+    end
+
+    defp deterministic_id(prefix, parts) do
+      digest =
+        parts
+        |> Enum.map_join(":", &to_string/1)
+        |> then(&:crypto.hash(:sha256, &1))
+        |> Base.encode16(case: :lower)
+        |> binary_part(0, 16)
+
+      "#{prefix}-#{digest}"
+    end
+
+    defp normalize_string_key_map(map) when is_map(map) do
+      Map.new(map, fn {key, value} -> {to_string(key), value} end)
+    end
+
+    defp get(map, key, default) do
+      Map.get(map, key, Map.get(map, to_string(key), default))
+    end
+  end
+
+  def normalize_fake_scenario!(scenario) when is_atom(scenario) do
+    scenario |> Atom.to_string() |> normalize_fake_scenario!()
+  end
+
+  def normalize_fake_scenario!(scenario) when is_binary(scenario) do
+    normalized =
+      scenario
+      |> String.trim()
+      |> String.downcase()
+      |> String.replace(~r/[^a-z0-9]+/, "_")
+      |> String.trim("_")
+
+    if normalized in @fake_scenarios do
+      normalized
+    else
+      raise ArgumentError, "unknown fake agent scenario: #{inspect(scenario)}"
+    end
+  end
+
+  def normalize_fake_scenario!(scenario) do
+    raise ArgumentError, "fake agent scenario must be a string or atom, got: #{inspect(scenario)}"
+  end
+
+  def normalize_fake_role!(role) when is_atom(role),
+    do: role |> Atom.to_string() |> normalize_fake_role!()
+
+  def normalize_fake_role!(role) when is_binary(role) do
+    normalized =
+      role
+      |> String.trim()
+      |> String.downcase()
+      |> String.replace(~r/[^a-z0-9]+/, "_")
+      |> String.trim("_")
+
+    if normalized in ["implementer", "reviewer"] do
+      normalized
+    else
+      raise ArgumentError, "unknown fake agent role: #{inspect(role)}"
+    end
+  end
+
+  def normalize_fake_role!(role) do
+    raise ArgumentError, "fake agent role must be a string or atom, got: #{inspect(role)}"
   end
 
   defp normalize_capabilities!(capabilities) when is_map(capabilities) do
