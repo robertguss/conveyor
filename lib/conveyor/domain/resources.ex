@@ -2342,15 +2342,30 @@ end
 defmodule Conveyor.Domain.PatchSet do
   use Conveyor.Domain.ActiveResource, table: "patch_sets"
 
+  alias Conveyor.Domain.PayloadHelpers
+
   @schema_version "conveyor.patch_set@1"
+  @summary_schema_version "conveyor.patch_set_summary@1"
+  @matrix_ref "conveyor-quality-ci-evals-vmr.13"
 
   def build!(attrs) when is_map(attrs) do
     Conveyor.Domain.ExecutionPayload.build!(
       @schema_version,
       attrs,
       [:patch_set_id, :run_attempt_id, :station_run_id, :diff_sha256],
-      %{patch_status: "proposed"},
-      [:base_commit, :summary, :files, :tool_invocation_ids, :metadata]
+      %{patch_status: "proposed", applies_cleanly: false, locked_path_touched: false},
+      [
+        :base_commit,
+        :diff_ref,
+        :generated_at,
+        :head_tree_digest,
+        :summary,
+        :files,
+        :line_counts,
+        :tool_invocation_ids,
+        :apply_log,
+        :metadata
+      ]
     )
   end
 
@@ -2358,6 +2373,177 @@ defmodule Conveyor.Domain.PatchSet do
     attrs
     |> build!()
     |> Conveyor.Domain.ExecutionPayload.create_attrs!(:patch_set_id, :station_run_id)
+  end
+
+  def capture!(attrs) when is_map(attrs) do
+    diff_text = PayloadHelpers.fetch_required!(attrs, :diff_text)
+    locked_paths = PayloadHelpers.get(attrs, :locked_paths, [])
+    files = diff_files(diff_text, locked_paths)
+    line_counts = line_counts(files)
+    patch_set_id = PayloadHelpers.fetch_required!(attrs, :patch_set_id)
+
+    attrs
+    |> Map.put(:diff_sha256, PayloadHelpers.sha256_binary(diff_text))
+    |> Map.put_new(:diff_ref, "artifact://patch_sets/#{patch_set_id}.diff")
+    |> Map.put(:files, files)
+    |> Map.put(:line_counts, line_counts)
+    |> Map.put(:locked_path_touched, Enum.any?(files, & &1["locked_path"]))
+    |> Map.put_new(:generated_at, DateTime.utc_now())
+    |> build!()
+  end
+
+  def summary(patch_set) when is_map(patch_set) do
+    patch_set = PayloadHelpers.normalize_map(patch_set)
+
+    %{
+      schema_version: @summary_schema_version,
+      category: "patch_set_capture",
+      matrix_ref: @matrix_ref,
+      patch_set_id: patch_set["patch_set_id"],
+      run_attempt_id: patch_set["run_attempt_id"],
+      station_run_id: patch_set["station_run_id"],
+      base_commit: patch_set["base_commit"],
+      diff_ref: patch_set["diff_ref"],
+      diff_sha256: patch_set["diff_sha256"],
+      generated_at: patch_set["generated_at"],
+      file_count: patch_set["files"] |> List.wrap() |> length(),
+      line_counts: patch_set["line_counts"] || %{},
+      locked_path_touched: patch_set["locked_path_touched"],
+      applies_cleanly: patch_set["applies_cleanly"],
+      head_tree_digest: patch_set["head_tree_digest"]
+    }
+  end
+
+  defp diff_files(diff_text, locked_paths) do
+    {_current_path, files} =
+      diff_text
+      |> String.split("\n", trim: false)
+      |> Enum.reduce({nil, %{}}, fn line, {current_path, files} ->
+        case diff_header_path(line) do
+          nil ->
+            count_diff_line(line, current_path, files)
+
+          path ->
+            files =
+              Map.put_new(files, path, %{
+                "path" => path,
+                "additions" => 0,
+                "deletions" => 0,
+                "locked_path" => locked_path?(path, locked_paths)
+              })
+
+            {path, files}
+        end
+      end)
+
+    files
+    |> Map.values()
+    |> Enum.sort_by(& &1["path"])
+  end
+
+  defp diff_header_path("diff --git a/" <> rest) do
+    case String.split(rest, " b/", parts: 2) do
+      [_old_path, new_path] -> new_path
+      _other -> nil
+    end
+  end
+
+  defp diff_header_path(_line), do: nil
+
+  defp count_diff_line(_line, nil, files), do: {nil, files}
+
+  defp count_diff_line("+++" <> _line, current_path, files), do: {current_path, files}
+  defp count_diff_line("---" <> _line, current_path, files), do: {current_path, files}
+
+  defp count_diff_line("+" <> _line, current_path, files) do
+    {current_path, update_in(files, [current_path, "additions"], &(&1 + 1))}
+  end
+
+  defp count_diff_line("-" <> _line, current_path, files) do
+    {current_path, update_in(files, [current_path, "deletions"], &(&1 + 1))}
+  end
+
+  defp count_diff_line(_line, current_path, files), do: {current_path, files}
+
+  defp line_counts(files) do
+    %{
+      "additions" => Enum.sum(Enum.map(files, & &1["additions"])),
+      "deletions" => Enum.sum(Enum.map(files, & &1["deletions"])),
+      "files_changed" => length(files)
+    }
+  end
+
+  defp locked_path?(path, locked_paths) when is_list(locked_paths) do
+    Enum.any?(locked_paths, &path_matches?(path, to_string(&1)))
+  end
+
+  defp locked_path?(_path, _locked_paths), do: false
+
+  defp path_matches?(path, pattern) do
+    cond do
+      String.ends_with?(pattern, "/**") ->
+        prefix = String.trim_trailing(pattern, "/**")
+        path == prefix or String.starts_with?(path, prefix <> "/")
+
+      String.contains?(pattern, "*") ->
+        wildcard_path_matches?(path, pattern)
+
+      true ->
+        path == pattern or String.starts_with?(path, pattern <> "/")
+    end
+  end
+
+  defp wildcard_path_matches?(path, pattern) do
+    leading_wildcard = String.starts_with?(pattern, "*")
+    trailing_wildcard = String.ends_with?(pattern, "*")
+
+    parts =
+      pattern
+      |> String.split("*", trim: false)
+      |> Enum.reject(&(&1 == ""))
+
+    case parts do
+      [] ->
+        true
+
+      [first | rest] ->
+        with {:ok, remaining} <- consume_wildcard_part(path, first, leading_wildcard),
+             {:ok, remaining} <- consume_wildcard_parts(remaining, rest) do
+          trailing_wildcard or remaining == ""
+        else
+          :error -> false
+        end
+    end
+  end
+
+  defp consume_wildcard_part(path, part, true), do: consume_wildcard_part(path, part)
+
+  defp consume_wildcard_part(path, part, false) do
+    if String.starts_with?(path, part) do
+      {:ok, String.replace_prefix(path, part, "")}
+    else
+      :error
+    end
+  end
+
+  defp consume_wildcard_parts(path, parts) do
+    Enum.reduce_while(parts, {:ok, path}, fn part, {:ok, remaining} ->
+      case consume_wildcard_part(remaining, part) do
+        {:ok, remaining} -> {:cont, {:ok, remaining}}
+        :error -> {:halt, :error}
+      end
+    end)
+  end
+
+  defp consume_wildcard_part(path, part) do
+    case :binary.match(path, part) do
+      {offset, length} ->
+        consumed = offset + length
+        {:ok, binary_part(path, consumed, byte_size(path) - consumed)}
+
+      :nomatch ->
+        :error
+    end
   end
 end
 

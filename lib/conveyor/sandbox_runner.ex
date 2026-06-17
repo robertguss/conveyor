@@ -8,12 +8,15 @@ defmodule Conveyor.SandboxRunner do
   """
 
   alias Conveyor.Domain.PayloadHelpers
+  alias Conveyor.Domain.PatchSet
   alias Conveyor.Domain.WorkspaceMaterialization
   alias Conveyor.ToolExecutor
 
   @adapter_schema "conveyor.sandbox_runner_docker@1"
   @event_schema "conveyor.sandbox_runner_event@1"
   @log_schema "conveyor.sandbox_runner_log@1"
+  @patch_apply_log_schema "conveyor.patch_set_apply_log@1"
+  @patch_apply_finding_schema "conveyor.patch_set_apply_finding@1"
   @matrix_ref "conveyor-quality-ci-evals-vmr.13"
   @reproducibility_ref "conveyor-quality-ci-evals-vmr.11"
   @workspace_path "/workspace"
@@ -135,6 +138,48 @@ defmodule Conveyor.SandboxRunner do
      }}
   end
 
+  def apply_patch(workspace, patch_set, opts \\ [])
+      when is_map(workspace) and is_map(patch_set) and is_list(opts) do
+    started_at = timestamp(opts)
+    workspace = PayloadHelpers.normalize_map(workspace)
+    patch_set = PayloadHelpers.normalize_map(patch_set)
+    git = git_runner(opts)
+
+    with :ok <- ensure_gate_workspace(workspace, patch_set),
+         :ok <- ensure_clean_workspace(git, workspace),
+         {:ok, source} <- patch_source(patch_set, opts),
+         {:ok, _check_output, _check_exit} <-
+           run_git_apply(git, workspace, source, check?: true),
+         {:ok, _apply_output, _apply_exit} <-
+           run_git_apply(git, workspace, source, check?: false) do
+      log = patch_apply_log(workspace, patch_set, "applied", started_at)
+
+      {:ok,
+       %{
+         status: "applied",
+         applies_cleanly: true,
+         patch_set:
+           patch_set
+           |> Map.put("applies_cleanly", true)
+           |> Map.put("head_tree_digest", workspace["head_tree_digest"])
+           |> Map.put("patch_status", "applied_to_clean_gate_workspace")
+           |> Map.put("apply_log", log),
+         patch_set_summary:
+           patch_set
+           |> Map.put("applies_cleanly", true)
+           |> Map.put("head_tree_digest", workspace["head_tree_digest"])
+           |> PatchSet.summary(),
+         log: log
+       }}
+    else
+      {:error, %{schema_version: @patch_apply_finding_schema} = finding} ->
+        {:error, Map.put_new(finding, :occurred_at, PayloadHelpers.iso8601(started_at))}
+
+      {:error, output, exit_code} ->
+        {:error, patch_apply_failed_finding(workspace, patch_set, output, exit_code, started_at)}
+    end
+  end
+
   def destroy(workspace, opts \\ []) when is_map(workspace) and is_list(opts) do
     started_at = timestamp(opts)
     workspace = PayloadHelpers.normalize_map(workspace)
@@ -198,6 +243,148 @@ defmodule Conveyor.SandboxRunner do
       "adapter" => "docker",
       "events" => Enum.map(events, &PayloadHelpers.normalize_map/1)
     }
+  end
+
+  defp ensure_gate_workspace(workspace, patch_set) do
+    cond do
+      workspace["purpose"] != "gate" ->
+        {:error,
+         patch_apply_finding(
+           "patch_apply_requires_gate_workspace",
+           "block_patch_apply",
+           "PatchSet verification must run in a fresh gate workspace.",
+           workspace,
+           patch_set
+         )}
+
+      present?(patch_set["base_commit"]) and patch_set["base_commit"] != workspace["base_commit"] ->
+        {:error,
+         patch_apply_finding(
+           "patch_apply_base_commit_mismatch",
+           "rematerialize_gate_workspace_at_patch_base",
+           "Gate workspace base commit does not match the PatchSet base commit.",
+           workspace,
+           patch_set
+         )}
+
+      true ->
+        :ok
+    end
+  end
+
+  defp ensure_clean_workspace(git, workspace) do
+    case git.(["status", "--porcelain"], cd: workspace["root_path"], stderr_to_stdout: true) do
+      {:ok, output, 0} ->
+        if String.trim(output) == "" do
+          :ok
+        else
+          {:error,
+           patch_apply_finding(
+             "dirty_gate_workspace_not_evidence",
+             "rematerialize_clean_gate_workspace",
+             "Dirty gate workspace state cannot be treated as patch evidence.",
+             workspace,
+             %{},
+             %{"dirty_status" => output}
+           )}
+        end
+
+      {:error, output, exit_code} ->
+        {:error, output, exit_code}
+    end
+  end
+
+  defp patch_source(patch_set, opts) do
+    cond do
+      is_binary(Keyword.get(opts, :diff_text)) ->
+        {:ok, {:stdin, Keyword.fetch!(opts, :diff_text)}}
+
+      is_binary(patch_set["diff_text"]) ->
+        {:ok, {:stdin, patch_set["diff_text"]}}
+
+      is_binary(Keyword.get(opts, :patch_file_path)) ->
+        {:ok, {:file, Keyword.fetch!(opts, :patch_file_path)}}
+
+      local_patch_ref?(patch_set["diff_ref"]) ->
+        {:ok, {:file, patch_set["diff_ref"]}}
+
+      true ->
+        {:error,
+         patch_apply_finding(
+           "patch_apply_missing_patch_source",
+           "provide_patch_file_or_diff_text",
+           "PatchSet apply verification requires a local patch file or diff text.",
+           %{},
+           patch_set
+         )}
+    end
+  end
+
+  defp run_git_apply(git, workspace, {:stdin, diff_text}, check?: check?) do
+    args = if check?, do: ["apply", "--check", "-"], else: ["apply", "-"]
+    git.(args, cd: workspace["root_path"], stderr_to_stdout: true, input: diff_text)
+  end
+
+  defp run_git_apply(git, workspace, {:file, path}, check?: check?) do
+    args = if check?, do: ["apply", "--check", path], else: ["apply", path]
+    git.(args, cd: workspace["root_path"], stderr_to_stdout: true)
+  end
+
+  defp patch_apply_log(workspace, patch_set, status, started_at) do
+    %{
+      "schema_version" => @patch_apply_log_schema,
+      "category" => "patch_set_apply",
+      "matrix_ref" => @matrix_ref,
+      "status" => status,
+      "patch_set_id" => patch_set["patch_set_id"],
+      "run_attempt_id" => patch_set["run_attempt_id"],
+      "station_run_id" => patch_set["station_run_id"],
+      "workspace_id" => workspace["workspace_id"],
+      "workspace_purpose" => workspace["purpose"],
+      "base_commit" => workspace["base_commit"],
+      "head_tree_digest" => workspace["head_tree_digest"],
+      "diff_sha256" => patch_set["diff_sha256"],
+      "applies_cleanly" => status == "applied",
+      "occurred_at" => PayloadHelpers.iso8601(started_at)
+    }
+  end
+
+  defp patch_apply_failed_finding(workspace, patch_set, output, exit_code, started_at) do
+    patch_apply_finding(
+      "patch_apply_failed",
+      "block_gate_until_patch_applies_cleanly",
+      "PatchSet did not apply cleanly to the gate workspace.",
+      workspace,
+      patch_set,
+      %{
+        "output" => to_string(output),
+        "exit_code" => exit_code,
+        "occurred_at" => PayloadHelpers.iso8601(started_at)
+      }
+    )
+  end
+
+  defp patch_apply_finding(category, action, message, workspace, patch_set, extra \\ %{}) do
+    workspace = if is_map(workspace), do: PayloadHelpers.normalize_map(workspace), else: %{}
+    patch_set = if is_map(patch_set), do: PayloadHelpers.normalize_map(patch_set), else: %{}
+
+    Map.merge(
+      %{
+        schema_version: @patch_apply_finding_schema,
+        category: category,
+        severity: "error",
+        matrix_ref: @matrix_ref,
+        action: action,
+        message: message,
+        patch_set_id: patch_set["patch_set_id"],
+        diff_sha256: patch_set["diff_sha256"],
+        workspace_id: workspace["workspace_id"],
+        workspace_purpose: workspace["purpose"],
+        base_commit: workspace["base_commit"],
+        head_tree_digest: workspace["head_tree_digest"]
+      },
+      extra
+    )
   end
 
   defp materialized_result(workspace, event) do
@@ -493,6 +680,14 @@ defmodule Conveyor.SandboxRunner do
     |> to_string()
     |> String.replace(~r/[^A-Za-z0-9_.-]/, "-")
   end
+
+  defp local_patch_ref?(path) when is_binary(path) do
+    Path.type(path) != :relative or String.starts_with?(path, ".")
+  end
+
+  defp local_patch_ref?(_path), do: false
+
+  defp present?(value), do: value not in [nil, ""]
 
   defp timestamp(opts), do: Keyword.get(opts, :timestamp, DateTime.utc_now())
 

@@ -1,6 +1,7 @@
 defmodule Conveyor.SandboxRunnerTest do
   use ExUnit.Case, async: true
 
+  alias Conveyor.Domain.PatchSet
   alias Conveyor.SandboxRunner
 
   @timestamp ~U[2026-06-17 01:42:00Z]
@@ -96,6 +97,93 @@ defmodule Conveyor.SandboxRunnerTest do
     assert exec_event["status"] == "completed"
     assert exec_event["tool_status"] == "completed"
     assert exec_event["output_sha256"] == result.tool_result.output_sha256
+  end
+
+  test "apply_patch verifies PatchSet against a clean gate workspace" do
+    probe = probe()
+    diff_text = sample_diff()
+
+    patch_set =
+      PatchSet.capture!(%{
+        patch_set_id: "patch-set-gate-001",
+        run_attempt_id: "run-attempt-gate",
+        station_run_id: "station-run-gate",
+        base_commit: "gate-base",
+        diff_text: diff_text,
+        generated_at: @timestamp
+      })
+
+    assert {:ok, result} =
+             SandboxRunner.apply_patch(workspace("gate"), patch_set,
+               timestamp: @timestamp,
+               git_runner: patch_apply_git_runner(probe),
+               diff_text: diff_text
+             )
+
+    assert result.status == "applied"
+    assert result.applies_cleanly == true
+    assert result.patch_set["patch_status"] == "applied_to_clean_gate_workspace"
+    assert result.patch_set["applies_cleanly"] == true
+    assert result.patch_set["head_tree_digest"] == "git-tree:gate-base-tree"
+    assert result.patch_set_summary.applies_cleanly == true
+    assert result.patch_set_summary.head_tree_digest == "git-tree:gate-base-tree"
+
+    assert %{
+             "schema_version" => "conveyor.patch_set_apply_log@1",
+             "category" => "patch_set_apply",
+             "matrix_ref" => "conveyor-quality-ci-evals-vmr.13",
+             "status" => "applied",
+             "patch_set_id" => "patch-set-gate-001",
+             "workspace_id" => "workspace-gate",
+             "workspace_purpose" => "gate",
+             "base_commit" => "gate-base",
+             "head_tree_digest" => "git-tree:gate-base-tree",
+             "diff_sha256" => diff_sha256,
+             "applies_cleanly" => true
+           } = result.log
+
+    assert diff_sha256 == patch_set["diff_sha256"]
+
+    assert [
+             {:git, ["status", "--porcelain"], _status_opts},
+             {:git, ["apply", "--check", "-"], check_opts},
+             {:git, ["apply", "-"], apply_opts}
+           ] = Agent.get(probe, & &1)
+
+    assert check_opts[:input] == diff_text
+    assert apply_opts[:input] == diff_text
+  end
+
+  test "apply_patch rejects dirty gate workspaces as evidence" do
+    probe = probe()
+    diff_text = sample_diff()
+
+    patch_set =
+      PatchSet.capture!(%{
+        patch_set_id: "patch-set-dirty-001",
+        run_attempt_id: "run-attempt-gate",
+        station_run_id: "station-run-gate",
+        base_commit: "gate-base",
+        diff_text: diff_text,
+        generated_at: @timestamp
+      })
+
+    assert {:error,
+            %{
+              schema_version: "conveyor.patch_set_apply_finding@1",
+              category: "dirty_gate_workspace_not_evidence",
+              action: "rematerialize_clean_gate_workspace",
+              workspace_id: "workspace-gate",
+              workspace_purpose: "gate",
+              head_tree_digest: "git-tree:gate-base-tree"
+            }} =
+             SandboxRunner.apply_patch(workspace("gate"), patch_set,
+               timestamp: @timestamp,
+               git_runner: patch_apply_git_runner(probe, dirty_status: " M lib/conveyor.ex\n"),
+               diff_text: diff_text
+             )
+
+    assert [{:git, ["status", "--porcelain"], _status_opts}] = Agent.get(probe, & &1)
   end
 
   test "destroy removes successful workspaces and preserves failed workspaces only when policy allows" do
@@ -232,6 +320,20 @@ defmodule Conveyor.SandboxRunnerTest do
     end
   end
 
+  defp patch_apply_git_runner(probe, opts \\ []) do
+    dirty_status = Keyword.get(opts, :dirty_status, "")
+
+    fn
+      ["status", "--porcelain"] = args, opts ->
+        record(probe, {:git, args, opts})
+        {:ok, dirty_status, 0}
+
+      ["apply" | _rest] = args, opts ->
+        record(probe, {:git, args, opts})
+        {:ok, "patch-ok\n", 0}
+    end
+  end
+
   defp remover(probe) do
     fn path ->
       record(probe, path)
@@ -262,5 +364,18 @@ defmodule Conveyor.SandboxRunnerTest do
         }
       }
     }
+  end
+
+  defp sample_diff do
+    """
+    diff --git a/lib/conveyor/example.ex b/lib/conveyor/example.ex
+    index 1111111..2222222 100644
+    --- a/lib/conveyor/example.ex
+    +++ b/lib/conveyor/example.ex
+    @@ -1 +1,2 @@
+    -old line
+    +new line
+    +another line
+    """
   end
 end

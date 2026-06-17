@@ -929,6 +929,91 @@ defmodule Conveyor.Domain.ResourceContractTest do
     assert record.payload["classification"] == "exact"
   end
 
+  test "PatchSet captures diff identity, line counts, locked paths, and summary" do
+    diff_text = """
+    diff --git a/lib/conveyor/example.ex b/lib/conveyor/example.ex
+    index 1111111..2222222 100644
+    --- a/lib/conveyor/example.ex
+    +++ b/lib/conveyor/example.ex
+    @@ -1,2 +1,3 @@
+    -old line
+    +new line
+    +another line
+     unchanged
+    diff --git a/test/example_test.exs b/test/example_test.exs
+    index 3333333..4444444 100644
+    --- a/test/example_test.exs
+    +++ b/test/example_test.exs
+    @@ -1 +1,2 @@
+     test line
+    +assert true
+    """
+
+    patch_set =
+      Conveyor.Domain.PatchSet.capture!(%{
+        patch_set_id: "patch-set-capture-001",
+        run_attempt_id: "run-attempt-capture-001",
+        station_run_id: "station-run-capture-001",
+        base_commit: "abc1234",
+        diff_text: diff_text,
+        locked_paths: ["lib/conveyor/**"],
+        generated_at: ~U[2026-06-17 03:20:00Z],
+        tool_invocation_ids: ["tool-invocation-capture-001"]
+      })
+
+    assert patch_set["schema_version"] == "conveyor.patch_set@1"
+    assert patch_set["diff_sha256"] == Conveyor.Domain.PayloadHelpers.sha256_binary(diff_text)
+    assert patch_set["diff_ref"] == "artifact://patch_sets/patch-set-capture-001.diff"
+    assert patch_set["base_commit"] == "abc1234"
+    refute Map.has_key?(patch_set, "diff_text")
+    assert patch_set["generated_at"] == "2026-06-17T03:20:00Z"
+    assert patch_set["locked_path_touched"] == true
+    assert patch_set["applies_cleanly"] == false
+
+    assert patch_set["line_counts"] == %{
+             "additions" => 3,
+             "deletions" => 1,
+             "files_changed" => 2
+           }
+
+    assert [
+             %{
+               "path" => "lib/conveyor/example.ex",
+               "additions" => 2,
+               "deletions" => 1,
+               "locked_path" => true
+             },
+             %{
+               "path" => "test/example_test.exs",
+               "additions" => 1,
+               "deletions" => 0,
+               "locked_path" => false
+             }
+           ] = patch_set["files"]
+
+    assert %{
+             schema_version: "conveyor.patch_set_summary@1",
+             category: "patch_set_capture",
+             matrix_ref: "conveyor-quality-ci-evals-vmr.13",
+             patch_set_id: "patch-set-capture-001",
+             base_commit: "abc1234",
+             diff_sha256: _diff_sha256,
+             file_count: 2,
+             line_counts: %{
+               "additions" => 3,
+               "deletions" => 1,
+               "files_changed" => 2
+             },
+             locked_path_touched: true,
+             applies_cleanly: false
+           } = Conveyor.Domain.PatchSet.summary(patch_set)
+
+    attrs = Conveyor.Domain.PatchSet.create_attrs!(patch_set)
+
+    assert attrs.external_id == "patch-set-capture-001"
+    assert attrs.payload["tool_invocation_ids"] == ["tool-invocation-capture-001"]
+  end
+
   test "execution resources preserve run, station, session, tool, review, and gate links" do
     first_attempt =
       Conveyor.Domain.RunAttempt.build!(%{
