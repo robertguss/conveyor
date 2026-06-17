@@ -1416,6 +1416,247 @@ end
 
 defmodule Conveyor.Domain.ContractLock do
   use Conveyor.Domain.ActiveResource, table: "contract_locks"
+
+  @schema_version "contract_lock@1"
+  @summary_schema_version "conveyor.contract_lock_summary@1"
+  @finding_schema_version "conveyor.contract_lock_finding@1"
+  @matrix_ref "conveyor-quality-ci-evals-vmr.13"
+  @contract_input_keys [
+    "plan_contract",
+    "agent_brief",
+    "acceptance_criteria",
+    "required_tests",
+    "test_pack",
+    "verification_commands",
+    "agents_md",
+    "policy",
+    "protected_paths"
+  ]
+
+  def schema_version, do: @schema_version
+  def contract_input_keys, do: @contract_input_keys
+
+  def build!(attrs) when is_map(attrs) do
+    lock_key = required_string!(attrs, :lock_key, fallback: :contract_lock_id)
+    base_commit = required_string!(attrs, :base_commit)
+    contract_inputs = contract_inputs!(attrs)
+
+    unsigned = %{
+      "schema_version" => @schema_version,
+      "lock_key" => lock_key,
+      "base_commit" => base_commit,
+      "contract_inputs" => contract_inputs,
+      "input_digests" => input_digests(contract_inputs)
+    }
+
+    unsigned
+    |> Map.put("lock_digest", lock_digest(unsigned))
+    |> Map.put("created_by", optional_string(attrs, :created_by, "conductor"))
+    |> Map.put("created_at", optional_datetime(attrs, :created_at))
+  end
+
+  def create_attrs!(attrs) when is_map(attrs) do
+    payload = build!(attrs)
+
+    %{
+      external_id: payload["lock_digest"],
+      name: payload["lock_key"],
+      status: "active",
+      payload: payload
+    }
+  end
+
+  def summary(lock_or_payload) when is_map(lock_or_payload) do
+    payload = payload(lock_or_payload)
+    contract_inputs = Map.fetch!(payload, "contract_inputs")
+
+    %{
+      schema_version: @summary_schema_version,
+      category: "contract_lock_digest",
+      matrix_ref: @matrix_ref,
+      lock_key: payload["lock_key"],
+      lock_digest: payload["lock_digest"],
+      base_commit: payload["base_commit"],
+      input_digests: payload["input_digests"],
+      contract_input_keys: @contract_input_keys,
+      acceptance_criteria_count: length(contract_inputs["acceptance_criteria"]),
+      required_test_count: length(contract_inputs["required_tests"]),
+      verification_command_count: length(contract_inputs["verification_commands"]),
+      protected_path_count: length(contract_inputs["protected_paths"])
+    }
+  end
+
+  def validate_current(lock_or_payload, attrs) when is_map(lock_or_payload) and is_map(attrs) do
+    locked = payload(lock_or_payload)
+
+    current =
+      attrs
+      |> Map.put_new(:lock_key, locked["lock_key"])
+      |> Map.put_new(:base_commit, locked["base_commit"])
+      |> build!()
+
+    if current["lock_digest"] == locked["lock_digest"] do
+      {:ok, summary(locked)}
+    else
+      {:error, invalidation_finding(locked, current)}
+    end
+  end
+
+  def current?(lock_or_payload, attrs) when is_map(lock_or_payload) and is_map(attrs) do
+    match?({:ok, _summary}, validate_current(lock_or_payload, attrs))
+  end
+
+  def invalidation_finding(locked, current) when is_map(locked) and is_map(current) do
+    locked = payload(locked)
+    current = payload(current)
+
+    %{
+      schema_version: @finding_schema_version,
+      category: "contract_lock_invalidation",
+      finding_code: "contract_lock_inputs_changed",
+      severity: "blocking",
+      matrix_ref: @matrix_ref,
+      old_lock_digest: locked["lock_digest"],
+      new_lock_digest: current["lock_digest"],
+      changed_inputs: changed_inputs(locked, current),
+      action: "create_new_contract_lock_and_run_attempt",
+      message:
+        "Contract-affecting inputs changed after the lock was created; keep the old lock for old evidence and create a new lock for future attempts."
+    }
+  end
+
+  defp contract_inputs!(attrs) do
+    %{
+      "plan_contract" => required_payload!(attrs, :plan_contract),
+      "agent_brief" => required_payload!(attrs, :agent_brief),
+      "acceptance_criteria" =>
+        sorted_required_list!(attrs, :acceptance_criteria, &criteria_sort_key/1),
+      "required_tests" => sorted_required_list!(attrs, :required_tests, &stable_sort_key/1),
+      "test_pack" => required_payload!(attrs, :test_pack),
+      "verification_commands" =>
+        sorted_required_list!(attrs, :verification_commands, &command_sort_key/1),
+      "agents_md" => required_payload!(attrs, :agents_md),
+      "policy" => required_payload!(attrs, :policy),
+      "protected_paths" => sorted_required_list!(attrs, :protected_paths, &stable_sort_key/1)
+    }
+  end
+
+  defp input_digests(contract_inputs) do
+    Map.new(contract_inputs, fn {key, value} ->
+      {key, Conveyor.Domain.PayloadHelpers.canonical_sha256(value)}
+    end)
+  end
+
+  defp lock_digest(unsigned) do
+    unsigned
+    |> Map.take(["schema_version", "base_commit", "contract_inputs", "input_digests"])
+    |> Conveyor.Domain.PayloadHelpers.canonical_sha256()
+  end
+
+  defp changed_inputs(locked, current) do
+    base_change =
+      if locked["base_commit"] == current["base_commit"], do: [], else: ["base_commit"]
+
+    input_changes =
+      @contract_input_keys
+      |> Enum.filter(fn key ->
+        get_in(locked, ["contract_inputs", key]) != get_in(current, ["contract_inputs", key])
+      end)
+
+    base_change ++ input_changes
+  end
+
+  defp payload(%{payload: payload}) when is_map(payload),
+    do: Conveyor.Domain.PayloadHelpers.normalize_map(payload)
+
+  defp payload(payload) when is_map(payload),
+    do: Conveyor.Domain.PayloadHelpers.normalize_map(payload)
+
+  defp required_payload!(attrs, key) do
+    attrs
+    |> Conveyor.Domain.PayloadHelpers.fetch_required!(key)
+    |> case do
+      value when value in [nil, "", [], %{}] ->
+        raise ArgumentError, "missing required contract lock input: #{key}"
+
+      value ->
+        Conveyor.Domain.PayloadHelpers.normalize_payload(value)
+    end
+  end
+
+  defp sorted_required_list!(attrs, key, sort_key) do
+    value = Conveyor.Domain.PayloadHelpers.fetch_required!(attrs, key)
+
+    case value do
+      values when is_list(values) and values != [] ->
+        normalized =
+          values
+          |> Conveyor.Domain.PayloadHelpers.normalize_list()
+          |> Enum.reject(&blank?/1)
+          |> Enum.sort_by(sort_key)
+
+        if normalized == [] do
+          raise ArgumentError, "contract lock input #{key} must be a non-empty list"
+        end
+
+        normalized
+
+      _other ->
+        raise ArgumentError, "contract lock input #{key} must be a non-empty list"
+    end
+  end
+
+  defp criteria_sort_key(criteria) when is_map(criteria) do
+    Map.get(criteria, "criterion_id") || Map.get(criteria, "ac_id") || Map.get(criteria, "id") ||
+      stable_sort_key(criteria)
+  end
+
+  defp criteria_sort_key(criteria), do: stable_sort_key(criteria)
+
+  defp command_sort_key(command) when is_map(command) do
+    Map.get(command, "command_id") || stable_sort_key(command)
+  end
+
+  defp command_sort_key(command), do: stable_sort_key(command)
+
+  defp stable_sort_key(value), do: Conveyor.Domain.PayloadHelpers.canonical_sha256(value)
+
+  defp required_string!(attrs, key, opts \\ []) do
+    value = Conveyor.Domain.PayloadHelpers.get(attrs, key)
+
+    value =
+      if value == nil and Keyword.has_key?(opts, :fallback) do
+        Conveyor.Domain.PayloadHelpers.get(attrs, Keyword.fetch!(opts, :fallback))
+      else
+        value
+      end
+
+    case value do
+      value when is_binary(value) and value != "" -> value
+      value when value not in [nil, ""] -> to_string(value)
+      _other -> raise ArgumentError, "missing required contract lock field: #{key}"
+    end
+  end
+
+  defp optional_string(attrs, key, default) do
+    case Conveyor.Domain.PayloadHelpers.get(attrs, key, default) do
+      value when is_binary(value) -> value
+      nil -> default
+      value -> to_string(value)
+    end
+  end
+
+  defp optional_datetime(attrs, key) do
+    attrs
+    |> Conveyor.Domain.PayloadHelpers.get(key, DateTime.utc_now())
+    |> Conveyor.Domain.PayloadHelpers.normalize_payload()
+  end
+
+  defp blank?(value) when is_binary(value), do: String.trim(value) == ""
+  defp blank?(value) when is_list(value), do: value == []
+  defp blank?(value) when is_map(value), do: map_size(value) == 0
+  defp blank?(nil), do: true
+  defp blank?(_value), do: false
 end
 
 defmodule Conveyor.Domain.TestPack do

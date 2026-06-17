@@ -424,6 +424,84 @@ defmodule Conveyor.Domain.ResourceContractTest do
     end
   end
 
+  test "ContractLock records stable digests and invalidates changed future inputs" do
+    attrs = contract_lock_attrs()
+    lock = Conveyor.Domain.ContractLock.build!(attrs)
+
+    reordered =
+      Conveyor.Domain.ContractLock.build!(
+        contract_lock_attrs(%{
+          acceptance_criteria: Enum.reverse(attrs.acceptance_criteria),
+          required_tests: Enum.reverse(attrs.required_tests),
+          verification_commands: Enum.reverse(attrs.verification_commands),
+          protected_paths: Enum.reverse(attrs.protected_paths)
+        })
+      )
+
+    assert lock["schema_version"] == "contract_lock@1"
+    assert lock["lock_digest"] == reordered["lock_digest"]
+    assert lock["lock_digest"] =~ ~r/^sha256:[a-f0-9]{64}$/
+
+    assert Enum.sort(Map.keys(lock["input_digests"])) ==
+             Enum.sort(Conveyor.Domain.ContractLock.contract_input_keys())
+
+    assert {:ok, record} =
+             Ash.create(
+               Conveyor.Domain.ContractLock,
+               Conveyor.Domain.ContractLock.create_attrs!(attrs),
+               action: :create
+             )
+
+    assert record.external_id == lock["lock_digest"]
+    assert record.payload["lock_digest"] == lock["lock_digest"]
+    assert record.payload["base_commit"] == "abc1234"
+
+    assert %{
+             schema_version: "conveyor.contract_lock_summary@1",
+             category: "contract_lock_digest",
+             matrix_ref: "conveyor-quality-ci-evals-vmr.13",
+             lock_key: "contract-lock-complete-task",
+             lock_digest: lock_digest,
+             base_commit: "abc1234",
+             acceptance_criteria_count: 2,
+             required_test_count: 1,
+             verification_command_count: 1,
+             protected_path_count: 2
+           } = Conveyor.Domain.ContractLock.summary(record)
+
+    assert lock_digest == lock["lock_digest"]
+
+    assert {:ok, %{lock_digest: ^lock_digest}} =
+             Conveyor.Domain.ContractLock.validate_current(record, attrs)
+
+    changed_attrs =
+      contract_lock_attrs(%{
+        policy: Map.put(attrs.policy, :policy_sha256, "sha256:policy-v2")
+      })
+
+    assert {:error,
+            %{
+              schema_version: "conveyor.contract_lock_finding@1",
+              category: "contract_lock_invalidation",
+              finding_code: "contract_lock_inputs_changed",
+              severity: "blocking",
+              matrix_ref: "conveyor-quality-ci-evals-vmr.13",
+              old_lock_digest: ^lock_digest,
+              new_lock_digest: new_lock_digest,
+              changed_inputs: ["policy"],
+              action: "create_new_contract_lock_and_run_attempt"
+            }} = Conveyor.Domain.ContractLock.validate_current(record, changed_attrs)
+
+    refute new_lock_digest == lock_digest
+
+    assert %{
+             lock_digest: ^lock_digest,
+             input_digests: old_input_digests
+           } = Conveyor.Domain.ContractLock.summary(record)
+
+    assert old_input_digests == lock["input_digests"]
+  end
+
   test "RunAttempt state machine guards autonomy, artifacts, review, gate, and reports" do
     assert {:ok, attempt} =
              Ash.create(
@@ -1234,6 +1312,52 @@ defmodule Conveyor.Domain.ResourceContractTest do
     digest_set()
     |> Enum.reverse()
     |> Map.new()
+  end
+
+  defp contract_lock_attrs(overrides \\ %{}) do
+    %{
+      lock_key: "contract-lock-complete-task",
+      base_commit: "abc1234",
+      plan_contract: %{
+        plan_id: "plan-complete-task",
+        schema_version: "conveyor.plan@1",
+        plan_digest: "sha256:plan-v1",
+        slice_ids: ["agent-brief-slice-001"]
+      },
+      agent_brief: Conveyor.Domain.AgentBrief.build!(agent_brief_attrs()),
+      acceptance_criteria: [
+        %{criterion_id: "AC-001", text: "PATCH /tasks/:id/complete marks a task complete."},
+        %{criterion_id: "AC-002", text: "GET /tasks shows the completed state."}
+      ],
+      required_tests: ["pytest sample_apps/fastapi_tasks/tests/test_complete_task.py"],
+      test_pack: %{
+        test_pack_key: "fastapi-tasks-contract",
+        version: 1,
+        test_pack_digest: "sha256:test-pack-v1",
+        scenarios: ["known-good-complete-task", "missing-state-update-mutant"]
+      },
+      verification_commands: [
+        %{
+          command_id: "VERIFY-001",
+          acceptance_refs: ["AC-001", "AC-002"],
+          command: ["python3", "-m", "pytest", "sample_apps/fastapi_tasks/tests"]
+        }
+      ],
+      agents_md: %{
+        path: "AGENTS.md",
+        sha256: "sha256:agents-v1",
+        required_rules: ["no file deletion", "run quality gates"]
+      },
+      policy: %{
+        policy_id: "default-l1",
+        policy_sha256: "sha256:policy-v1",
+        autonomy_ceiling: "L1"
+      },
+      protected_paths: [".conveyor/**", "priv/repo/**"],
+      created_by: "conductor",
+      created_at: ~U[2026-06-17 02:20:00Z]
+    }
+    |> Map.merge(overrides)
   end
 
   defp agent_brief_attrs(overrides \\ %{}) do
